@@ -452,11 +452,14 @@ def load() -> dict | None:
         return None
     box = nacl.secret.SecretBox(_master_key())
     try:
-        return json.loads(box.decrypt(f.read_bytes()).decode())
-    except nacl.exceptions.CryptoError as e:
+        data = json.loads(box.decrypt(f.read_bytes()).decode())
+        if not isinstance(data, dict):
+            raise ValueError("invalid session document")
+        return data
+    except (nacl.exceptions.CryptoError, ValueError, UnicodeError, OSError) as e:
         raise SessionError(
-            f"cannot decrypt {f} - the master key no longer matches it (the keyring entry was "
-            "lost or replaced). Run `icp logout`, then `icp login` to sign in again.") from e
+            f"cannot decrypt or parse {f} - the ciphertext was preserved (the master key may "
+            "no longer match it). Run `icp logout`, then `icp login` to sign in again.") from e
 
 
 @paths.mutation_lock

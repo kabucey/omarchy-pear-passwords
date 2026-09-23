@@ -12,7 +12,6 @@ typo and a damaged file are the same CryptoError, and the caller would helpfully
 from __future__ import annotations
 
 import json
-import os
 
 import nacl.exceptions
 import nacl.pwhash
