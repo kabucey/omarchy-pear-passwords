@@ -735,6 +735,10 @@ def _build_parser():
                         choices=["password", "username", "domain"])
     p_copy.add_argument("--seconds", type=int, default=30)
     p_copy.set_defaults(func=appapi.cmd_app_copy)
+    p_clip = sub.add_parser("app-clipboard-clear", help=argparse.SUPPRESS)
+    p_clip.add_argument("--token", default=None)
+    p_clip.add_argument("--delay", type=int, default=0)
+    p_clip.set_defaults(func=appapi.cmd_app_clipboard_clear)
     for name, fn in (("app-totp-preview", appapi.cmd_app_totp_preview),
                      ("app-scan-qr", appapi.cmd_app_scan_qr),
                      ("app-create", appapi.cmd_app_create)):
