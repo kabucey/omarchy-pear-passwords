@@ -46,13 +46,12 @@ class ClockTests(unittest.TestCase):
 
     def test_elevate_inside_the_window_never_prompts(self):
         self.write()
-        with mock.patch("icp.ui.reauth.challenge", side_effect=AssertionError("prompted")):
+        with mock.patch("icp.ui.reauth.challenge_status", side_effect=AssertionError("prompted")):
             self.assertTrue(appapi._elevate())
 
     def test_elevate_outside_the_window_prompts_and_restarts_both_clocks(self):
         self.write(age_full=appapi.FULL_TTL + 1, age_session=appapi.SESSION_TTL - 30)
-        with mock.patch("icp.ui.reauth.available", return_value=True), \
-             mock.patch("icp.ui.reauth.challenge", return_value=True) as ch:
+        with mock.patch("icp.ui.reauth.challenge_status", return_value="authed") as ch:
             self.assertTrue(appapi._elevate())
             self.assertEqual(ch.call_count, 1)
         self.assertTrue(appapi._full_access())
@@ -61,8 +60,7 @@ class ClockTests(unittest.TestCase):
 
     def test_a_refused_scan_leaves_the_window_shut(self):
         self.write(age_full=appapi.FULL_TTL + 1)
-        with mock.patch("icp.ui.reauth.available", return_value=True), \
-             mock.patch("icp.ui.reauth.challenge", return_value=False):
+        with mock.patch("icp.ui.reauth.challenge_status", return_value="denied"):
             self.assertFalse(appapi._elevate())
         self.assertFalse(appapi._full_access())
 
