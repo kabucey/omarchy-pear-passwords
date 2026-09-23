@@ -83,7 +83,7 @@ class MasterKeyTests(unittest.TestCase):
         with self.assertRaises(session.SessionError):
             session.load()
 
-    def test_undecryptable_caches_are_discarded(self):
+    def test_undecryptable_caches_are_preserved_and_fail_closed(self):
         from icp.auth import session
         from icp.hme import store as hme
         from icp.hme.client import HmeAlias
@@ -97,9 +97,17 @@ class MasterKeyTests(unittest.TestCase):
         self.assertEqual(len(hme.load_aliases()), 1)
         self.assertEqual(len(vault.load_vault()), 1)
 
+        vault_path = vault.paths.vault_file()
+        aliases_path = hme.paths.aliases_file()
+        old_vault = vault_path.read_bytes()
+        old_aliases = aliases_path.read_bytes()
         self._key_file().write_bytes(base64.b64encode(os.urandom(32)))
-        self.assertEqual(len(vault.load_vault()), 0)  # dropped, rebuilt by the next sync
-        self.assertEqual(hme.load_aliases(), [])
+        with self.assertRaises(vault.VaultError):
+            vault.load_vault()
+        with self.assertRaises(hme.AliasesError):
+            hme.load_aliases()
+        self.assertEqual(vault_path.read_bytes(), old_vault)
+        self.assertEqual(aliases_path.read_bytes(), old_aliases)
 
 
 if __name__ == "__main__":
