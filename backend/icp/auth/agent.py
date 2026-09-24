@@ -100,18 +100,19 @@ def _serve() -> int:
                     conn.sendall(b"ERR wrong passphrase\n")
                 except AppleError as e:
                     conn.sendall(b"ERR " + str(e).replace("\n", " ").encode() + b"\n")
-            elif cmd == "LOAD":
+            elif cmd == "UNLOCK_KEY":
+                # Pass a freshly derived key from the migration process without publishing
+                # the staged KDF files first.  The socket is 0600 inside a 0700 runtime
+                # directory; the key is never written to disk and is held only by the agent.
                 try:
-                    raw = bytes.fromhex(arg.strip())
-                except ValueError:
-                    conn.sendall(b"ERR bad key\n")
-                    continue
-                if not lockbox.verify(raw):
-                    conn.sendall(b"ERR bad key\n")
-                else:
-                    key = bytearray(raw)
+                    candidate = bytes.fromhex(arg)
+                    if len(candidate) != lockbox._KEY_SIZE:
+                        raise ValueError("invalid key length")
+                    key = bytearray(candidate)
                     expires = time.monotonic() + _timeout()
                     conn.sendall(b"OK\n")
+                except (ValueError, TypeError):
+                    conn.sendall(b"ERR invalid derived key\n")
             elif cmd == "LOCK":
                 wipe()
                 conn.sendall(b"OK\n")
@@ -178,10 +179,20 @@ def unlock(passphrase: str) -> None:
         raise AgentError(resp.removeprefix("ERR ") or "unlock failed")
 
 
-def load_key(key: bytes) -> None:
-    resp = _request("LOAD " + key.hex())
+def unlock_key(key: bytes) -> None:
+    """Install an already-derived key for an atomic passphrase migration.
+
+    The migration stages the new KDF parameters until all ciphertext is ready, so the normal
+    passphrase command cannot derive through the still-active old parameters.  This transport
+    is local-only and transient: the key is sent over the private agent socket and retained only
+    in the agent's memory.
+    """
+    raw = bytes(key)
+    if len(raw) != lockbox._KEY_SIZE:
+        raise AgentError("invalid derived key")
+    resp = _request("UNLOCK_KEY " + raw.hex())
     if resp != "OK":
-        raise AgentError(resp.removeprefix("ERR ") or "load failed")
+        raise AgentError(resp.removeprefix("ERR ") or "unlock failed")
 
 
 def lock() -> None:
@@ -189,6 +200,25 @@ def lock() -> None:
         _request("LOCK", autostart=False)
     except (AgentError, OSError):
         pass  # not running == already locked
+
+
+def lock_strict() -> None:
+    """Invalidate the runtime key, surfacing failures instead of swallowing them.
+
+    Rollback code must not restore old ciphertext while a newly derived key is still reachable
+    from this process's agent.  A missing agent is already inaccessible and is therefore safe;
+    every other failure is fatal to rollback.
+    """
+    try:
+        resp = _request("LOCK", autostart=False)
+    except AgentError as e:
+        if str(e) == "agent not running":
+            return
+        raise
+    except OSError as e:
+        raise AgentError("could not invalidate the key agent") from e
+    if resp != "OK":
+        raise AgentError(resp.removeprefix("ERR ") or "could not invalidate the key agent")
 
 
 def status() -> str:

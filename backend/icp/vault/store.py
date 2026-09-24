@@ -10,17 +10,22 @@ import nacl.exceptions
 import nacl.secret
 
 from .. import paths
+from ..errors import EncryptedStoreError
 from .host import Credential, CredentialStore
 from ..auth.session import _master_key
 
 
-def save_vault(store: CredentialStore) -> None:
+class VaultError(EncryptedStoreError):
+    """The local vault exists but its ciphertext or JSON cannot be trusted."""
+
+
+@paths.mutation_lock
+def save_vault(store: CredentialStore, *, path=None) -> None:
     creds = [c.storage_dict() for c in store.all()]
     box = nacl.secret.SecretBox(_master_key())
     blob = box.encrypt(json.dumps({"credentials": creds}).encode())
-    f = paths.vault_file()
-    f.write_bytes(blob)
-    f.chmod(0o600)
+    f = path or paths.vault_file()
+    paths.atomic_write_private(f, blob)
 
 
 def load_vault() -> CredentialStore:
@@ -30,18 +35,23 @@ def load_vault() -> CredentialStore:
     box = nacl.secret.SecretBox(_master_key())
     try:
         data = json.loads(box.decrypt(f.read_bytes()).decode())
-    except nacl.exceptions.CryptoError:
-        logging.getLogger(__name__).warning("cannot decrypt %s with the current master key; "
-                                            "discarding it - run `icp sync` to rebuild", f)
-        f.unlink()
-        return CredentialStore([])
-    creds = [Credential(domain=c.get("domain", ""), username=c.get("username", ""),
-                        password=c.get("password", ""), title=c.get("title", ""),
-                        mdat=c.get("mdat", 0.0), totp=c.get("totp"),
-                        notes=c.get("notes", ""),
-                        aliases=tuple(c.get("aliases") or ()),
-                        apple_history=tuple(c.get("apple_history") or ()),
-                        apple_title=c.get("apple_title", ""),
-                        sites=tuple(c.get("sites") or ()))
-             for c in data.get("credentials", [])]
+        if not isinstance(data, dict) or not isinstance(data.get("credentials"), list):
+            raise ValueError("invalid vault document")
+        creds = [Credential(domain=c.get("domain", ""), username=c.get("username", ""),
+                            password=c.get("password", ""), title=c.get("title", ""),
+                            mdat=c.get("mdat", 0.0), totp=c.get("totp"),
+                            notes=c.get("notes", ""),
+                            aliases=tuple(c.get("aliases") or ()),
+                            apple_history=tuple(c.get("apple_history") or ()),
+                            apple_title=c.get("apple_title", ""),
+                            sites=tuple(c.get("sites") or ()))
+                 for c in data["credentials"]]
+    except (nacl.exceptions.CryptoError, OSError, UnicodeError, ValueError, TypeError,
+            AttributeError, KeyError) as e:
+        logging.getLogger(__name__).warning(
+            "cannot decrypt or parse %s; preserving the ciphertext and refusing to serve it",
+            f)
+        raise VaultError(
+            f"cannot decrypt or parse {f}; ciphertext was preserved - refusing to use the "
+            "vault until it is repaired or replaced") from e
     return CredentialStore(creds)

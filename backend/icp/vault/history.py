@@ -21,6 +21,7 @@ import nacl.secret
 
 from .. import paths
 from ..auth.session import _master_key
+from ..errors import EncryptedStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -31,29 +32,43 @@ SOURCE_APPLE = "apple"    # lifted from Apple's own s_hi history
 MAX_PER_ACCOUNT = 50      # a runaway rotation must not grow the file without bound
 
 
+class HistoryError(EncryptedStoreError):
+    """The password history exists but its ciphertext or JSON cannot be trusted."""
+
+
 def _key(domain: str, username: str) -> str:
     return f"{domain}\x1f{username}"
 
 
 def load() -> dict:
-    """{account_key: [entry, ...]} newest first. Never raises - a corrupt journal is not worth
-    failing a sync over, and losing history is recoverable where losing a sync is annoying."""
+    """{account_key: [entry, ...]} newest first.
+
+    A corrupt journal is preserved and rejected rather than returned as an empty map, because
+    the next save would otherwise overwrite the only copy of the ciphertext.
+    """
     f = paths.history_file()
     if not f.exists():
         return {}
     try:
         box = nacl.secret.SecretBox(_master_key())
-        return json.loads(box.decrypt(f.read_bytes()).decode()).get("accounts", {})
-    except (nacl.exceptions.CryptoError, ValueError) as e:
-        logger.warning("cannot read the password history (%s); starting a new one", e)
-        return {}
+        data = json.loads(box.decrypt(f.read_bytes()).decode())
+        if not isinstance(data, dict) or not isinstance(data.get("accounts"), dict):
+            raise ValueError("invalid history document")
+        return data["accounts"]
+    except (nacl.exceptions.CryptoError, OSError, UnicodeError, ValueError, TypeError,
+            AttributeError, KeyError) as e:
+        logger.warning("cannot read the password history (%s); preserving it", e)
+        raise HistoryError(
+            f"cannot decrypt or parse {f}; ciphertext was preserved - refusing to use the "
+            "password history until it is repaired or replaced"
+        ) from e
 
 
-def save(accounts: dict) -> None:
+@paths.mutation_lock
+def save(accounts: dict, *, path=None) -> None:
     box = nacl.secret.SecretBox(_master_key())
-    f = paths.history_file()
-    f.write_bytes(box.encrypt(json.dumps({"accounts": accounts}).encode()))
-    f.chmod(0o600)
+    f = path or paths.history_file()
+    paths.atomic_write_private(f, box.encrypt(json.dumps({"accounts": accounts}).encode()))
 
 
 def record(accounts: dict, domain: str, username: str, *, old: str | None, new: str,

@@ -34,6 +34,7 @@ class LockboxTests(unittest.TestCase):
     def test_passphrase_is_never_stored(self):
         """The whole point: nothing on disk may contain the passphrase or the key."""
         from icp.auth import lockbox
+        from icp import paths
         secret = "zomboidfeatherquartz"
         key = lockbox.initialise(secret)
         for f in (lockbox.params_file(), lockbox.check_file()):
@@ -41,6 +42,7 @@ class LockboxTests(unittest.TestCase):
             self.assertNotIn(secret.encode(), blob)
             self.assertNotIn(key, blob)
             self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(paths.vault_key_file().exists())
 
     def test_rederives_same_key_across_processes(self):
         """Salt is persisted, so a fresh process gets the same key from the same passphrase."""
@@ -92,6 +94,25 @@ class AgentTimeoutTests(unittest.TestCase):
         lockbox.initialise("a passphrase that is long")
         with self.assertRaises(agent.AgentError):
             agent.unlock("wrong")
+
+    def test_transient_derived_key_load_is_not_persisted(self):
+        """Migration can stage a new KDF before publishing it, without writing the key."""
+        from icp.auth import agent, lockbox
+        self._old_timeout = os.environ["ICP_LOCK_TIMEOUT"]
+        os.environ["ICP_LOCK_TIMEOUT"] = "60"
+        key = lockbox.prepare_initialisation("a passphrase that is long")[0]
+        agent.unlock_key(key)
+        self.assertEqual(agent.get_key(), key)
+        agent.lock_strict()
+        self.assertFalse(lockbox.params_file().exists())
+        self.assertFalse(lockbox.check_file().exists())
+
+    def test_raw_key_load_command_is_not_an_unlock_path(self):
+        from icp.auth import agent, lockbox
+        lockbox.initialise("a passphrase that is long")
+        key = lockbox.derive("a passphrase that is long")
+        self.assertEqual(agent._request("LOAD " + key.hex()), "ERR unknown command")
+        self.assertEqual(agent.status(), "locked")
 
 
 if __name__ == "__main__":

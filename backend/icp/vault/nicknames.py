@@ -22,9 +22,14 @@ import nacl.secret
 
 from .. import paths
 from ..auth.session import _master_key
+from ..errors import EncryptedStoreError
 
 logger = logging.getLogger(__name__)
 MAX_LEN = 80
+
+
+class NicknamesError(EncryptedStoreError):
+    """The nickname map exists but its ciphertext or JSON cannot be trusted."""
 
 
 def load() -> dict:
@@ -33,17 +38,24 @@ def load() -> dict:
         return {}
     try:
         box = nacl.secret.SecretBox(_master_key())
-        return json.loads(box.decrypt(f.read_bytes()).decode()).get("names", {})
-    except (nacl.exceptions.CryptoError, ValueError) as e:
-        logger.warning("cannot read nicknames (%s); starting fresh", e)
-        return {}
+        data = json.loads(box.decrypt(f.read_bytes()).decode())
+        if not isinstance(data, dict) or not isinstance(data.get("names"), dict):
+            raise ValueError("invalid nicknames document")
+        return data["names"]
+    except (nacl.exceptions.CryptoError, OSError, UnicodeError, ValueError, TypeError,
+            AttributeError, KeyError) as e:
+        logger.warning("cannot read nicknames (%s); preserving it", e)
+        raise NicknamesError(
+            f"cannot decrypt or parse {f}; ciphertext was preserved - refusing to use the "
+            "nickname map until it is repaired or replaced"
+        ) from e
 
 
-def save(names: dict) -> None:
+@paths.mutation_lock
+def save(names: dict, *, path=None) -> None:
     box = nacl.secret.SecretBox(_master_key())
-    f = paths.nicknames_file()
-    f.write_bytes(box.encrypt(json.dumps({"names": names}).encode()))
-    f.chmod(0o600)
+    f = path or paths.nicknames_file()
+    paths.atomic_write_private(f, box.encrypt(json.dumps({"names": names}).encode()))
 
 
 def clean(value: str) -> str:
