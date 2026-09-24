@@ -528,7 +528,12 @@ def _ensure_web_session(s: dict, *, interactive: bool):
                                   cookies=wa.get("cookies"))
 
     account_data = None
-    if sess.session_data.get("session_token"):
+    if getattr(sess, "cookies_need_reauth", False):
+        # Older exports stored a name -> value dict.  Those values are hostless when
+        # reconstructed by Requests, so WebAuthSession discards them and forces a full
+        # sign-in instead of attempting accountLogin with stale session state.
+        sess.session_data.clear()
+    elif sess.session_data.get("session_token"):
         try:
             account_data = sess.account_login()
             if webauth.hsa_challenge_required(account_data):

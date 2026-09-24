@@ -11,6 +11,7 @@ Run: .venv/bin/python -m unittest tests.test_escrow_srp
 import hashlib
 import os
 import unittest
+from unittest import mock
 
 from icp.escrow import srp as es
 
@@ -211,6 +212,16 @@ class _Anis:
         return {"X-Apple-I-MD": "x", "X-Mme-Client-Info": "STALE-ANISETTE-VALUE"}
 
 
+class _FakeSession:
+    def __init__(self, callback):
+        self.callback = callback
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.callback(url, **kwargs)
+
+
 class GatedTests(unittest.TestCase):
     def test_recover_refuses_without_confirmation(self):
         rec = es.EscrowRecovery("https://example", "me@icloud.com", "PET", _Anis())
@@ -296,15 +307,10 @@ class GatedTests(unittest.TestCase):
                 content = plistlib.dumps({"ok": True})
             return R()
 
+        session = _FakeSession(fake_post)
         rec = es.EscrowRecovery("https://p99-escrowproxy.icloud.com/",
-                                "person@icloud.com", "PET-XYZ", _Anis())
-        import requests as _rq
-        orig = _rq.post
-        _rq.post = fake_post
-        try:
-            rec._invoke("srp_init", rec._request("srp_init", "lbl", "TXN", blob="QUJD"))
-        finally:
-            _rq.post = orig
+                                "person@icloud.com", "PET-XYZ", _Anis(), session=session)
+        rec._invoke("srp_init", rec._request("srp_init", "lbl", "TXN", blob="QUJD"))
 
         self.assertEqual(captured["url"],
                          "https://p99-escrowproxy.icloud.com/escrowproxy/api/srp_init")
@@ -315,6 +321,38 @@ class GatedTests(unittest.TestCase):
         body = plistlib.loads(captured["data"])
         self.assertEqual(body["command"], "SRP_INIT")
         self.assertEqual(body["transactionUUID"], "TXN")
+
+    def test_invoke_rejects_untrusted_service_url_before_posting_pet(self):
+        session = mock.Mock()
+        rec = es.EscrowRecovery("http://evil.example", "person@icloud.com", "PET-XYZ", _Anis(),
+                                session=session)
+        with self.assertRaises(es.EscrowGateError):
+            rec._invoke("srp_init", rec._request("srp_init", "lbl", "TXN", blob="QUJD"))
+        session.post.assert_not_called()
+
+    def test_invoke_rejects_redirects_without_sending_a_second_request(self):
+        import plistlib
+        for status in (307, 308):
+            with self.subTest(status=status):
+                captured = {}
+
+                def fake_post(url, **kwargs):
+                    captured.update(url=url, kwargs=kwargs)
+
+                    class R:
+                        status_code = status
+                        headers = {"Location": "https://evil.example/collect"}
+                        content = plistlib.dumps({"ignored": True})
+
+                    return R()
+
+                session = _FakeSession(fake_post)
+                rec = es.EscrowRecovery(
+                    "https://p99-escrowproxy.icloud.com/", "person@icloud.com", "PET-XYZ",
+                    _Anis(), session=session)
+                with self.assertRaisesRegex(es.EscrowGateError, "redirect"):
+                    rec._invoke("srp_init", rec._request("srp_init", "lbl", "TXN", blob="QUJD"))
+                self.assertFalse(captured["kwargs"]["allow_redirects"])
 
     def test_list_records_parses_metadata_non_destructively(self):
         # GETRECORDS: URL slug get_records, body command GETRECORDS; per-record metadata is a

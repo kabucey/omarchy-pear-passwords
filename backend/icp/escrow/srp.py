@@ -19,7 +19,11 @@ import os
 import plistlib
 import uuid as _uuid
 
+import requests
+
 from .. import const
+from ..auth.endpoints import is_apple_service_url
+from ..auth.http import secure_session
 from ..errors import AppleError
 
 # RFC 5054 2048-bit group (N, g=2). Standard public constant.
@@ -181,12 +185,14 @@ class EscrowRecovery:
     ESCROW_MME_CLIENT_INFO = (f"<{const.DEVICE_MODEL}> <macOS;{const.OS_VERSION};{const.OS_BUILD}> "
                               "<com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>")
 
-    def __init__(self, host: str, email: str, pet: str, anisette, *, timeout: int = 30):
+    def __init__(self, host: str, email: str, pet: str, anisette, *, timeout: int = 30,
+                 session: requests.Session | None = None):
         self.host = host.rstrip("/")
         self.email = email
         self.pet = pet
         self.anisette = anisette
         self.timeout = timeout
+        self.http = secure_session(verify=True, session=session)
 
     def _headers(self) -> dict:
         h = {
@@ -203,12 +209,20 @@ class EscrowRecovery:
 
     def _invoke(self, command: str, request: dict) -> dict:
         """POST a single escrowproxy command. LIVE."""
-        import requests
+        if not is_apple_service_url(self.host):
+            raise EscrowGateError(
+                "refusing an invalid escrow service URL; expected an HTTPS iCloud host")
         body = plistlib.dumps(request)
         # verify=True: carries the PET + drives the irreversible flow, must not be MITM'd
-        resp = requests.post(f"{self.host}/escrowproxy/api/{command}",
-                             headers=self._headers(), data=body,
-                             auth=(self.email, self.pet), verify=True, timeout=self.timeout)
+        resp = self.http.post(f"{self.host}/escrowproxy/api/{command}",
+                              headers=self._headers(), data=body,
+                              auth=(self.email, self.pet), timeout=self.timeout,
+                              allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            location = getattr(resp, "headers", {}).get("Location", "")
+            raise EscrowGateError(
+                "refusing an unexpected escrow redirect"
+                + (f" to {location!r}" if location else ""))
         data = plistlib.loads(resp.content)
         if not (200 <= resp.status_code < 300):
             raise EscrowGateError(f"escrowproxy/{command} HTTP {resp.status_code}: {data}")
