@@ -11,7 +11,9 @@ import urllib3
 from . import ca
 from .anisette import Anisette
 from .device import Device
+from .endpoints import is_apple_service_url
 from .headers import identity_headers
+from .http import secure_session
 from ..errors import AppleError
 
 urllib3.disable_warnings()
@@ -41,9 +43,26 @@ def _basic(user: str, secret: str) -> str:
     return "Basic " + base64.b64encode(f"{user}:{secret}".encode()).decode()
 
 
+def _post_service(url: str, *, headers: dict, data, operation: str,
+                  session: requests.Session | None = None):
+    """POST an authenticated iCloud service request without following redirects."""
+    if not is_apple_service_url(url):
+        raise ICloudError(
+            f"refusing an invalid {operation} URL; expected an HTTPS iCloud host")
+    http = secure_session(verify=ca.bundle(), session=session)
+    resp = http.post(url, headers=headers, data=data, timeout=20, allow_redirects=False)
+    if 300 <= resp.status_code < 400:
+        location = getattr(resp, "headers", {}).get("Location", "")
+        raise ICloudError(
+            f"{operation} returned an unexpected redirect"
+            + (f" to {location!r}" if location else ""))
+    return resp
+
+
 def login_mobileme(username: str, pet: str, adsid: str, client_id: str,
                    device: Device, anisette: Anisette,
-                   url: str = LOGIN_DELEGATES_URL) -> tuple[str, str, dict, dict]:
+                   url: str = LOGIN_DELEGATES_URL, *,
+                   session: requests.Session | None = None) -> tuple[str, str, dict, dict]:
     """Exchange the fresh PET for the persistent mmeAuthToken.
     Returns (dsid, mme_auth_token, service_data, raw_response)."""
     body = plist.dumps({
@@ -62,7 +81,8 @@ def login_mobileme(username: str, pet: str, adsid: str, client_id: str,
     headers.update(identity_headers(device, anisette))
     headers["Authorization"] = _basic(username, pet)  # apple-id:PET (NOT dsid:PET)
 
-    resp = requests.post(url, headers=headers, data=body, verify=ca.bundle(), timeout=20)
+    resp = _post_service(url, headers=headers, data=body, operation="loginDelegates",
+                         session=session)
     logger.debug("loginDelegates -> HTTP %s (%d bytes)", resp.status_code, len(resp.content))
     data = plist.loads(resp.content)
 
@@ -79,7 +99,8 @@ def login_mobileme(username: str, pet: str, adsid: str, client_id: str,
 
 
 def fetch_account_settings(record: dict, device: Device, anisette: Anisette,
-                           url: str = ACCOUNT_SETTINGS_URL) -> tuple[int, dict]:
+                           url: str = ACCOUNT_SETTINGS_URL, *,
+                           session: requests.Session | None = None) -> tuple[int, dict]:
     """With the stored mmeAuthToken, fetch the account/webservices settings. Auth is
     `Basic base64(dsid:mmeAuthToken)`. Returns (http_status, parsed_plist)."""
     mme = record.get("mme") or {}
@@ -96,7 +117,8 @@ def fetch_account_settings(record: dict, device: Device, anisette: Anisette,
     }
     headers.update(identity_headers(device, anisette))
 
-    resp = requests.post(url, headers=headers, data="", verify=ca.bundle(), timeout=20)
+    resp = _post_service(url, headers=headers, data="", operation="get_account_settings",
+                         session=session)
     logger.debug("get_account_settings -> HTTP %s (%d bytes)",
                  resp.status_code, len(resp.content))
     return resp.status_code, plist.loads(resp.content)
@@ -108,13 +130,15 @@ def extract_webservices(settings: dict) -> dict:
       - modern:  settings["webservices"][name] = {"url": ..., "status": ...}
       - classic: settings["com.apple.mobileme"]["com.apple.Dataclass.X"] = {"url": ...}
 
-    Returns {name: {"url": ...}} so callers can read ckdatabasews / keyvalue / escrowproxy.
+    Returns only strict HTTPS iCloud service URLs as {name: {"url": ...}} so callers can
+    safely read ckdatabasews / keyvalue / escrowproxy without sending credentials to a
+    server-controlled arbitrary host.
     """
     out: dict = {}
     ws = settings.get("webservices")
     if isinstance(ws, dict):
         for name, v in ws.items():
-            if isinstance(v, dict) and v.get("url"):
+            if isinstance(v, dict) and is_apple_service_url(v.get("url")):
                 out[name] = {"url": v["url"], "status": v.get("status")}
 
     # Some services carry their endpoint under a non-"url" key (KeychainSync -> escrowProxyUrl,
@@ -126,11 +150,12 @@ def extract_webservices(settings: dict) -> dict:
             if not isinstance(v, dict):
                 continue
             url = next((v[k] for k in _alt_url_keys if v.get(k)), None)
-            if not url:
+            if not is_apple_service_url(url):
                 continue
             entry = {"url": url, "status": v.get("status")}
-            if v.get("escrowProxyUrl"):
-                entry["escrowProxyUrl"] = v["escrowProxyUrl"]
+            escrow_url = v.get("escrowProxyUrl")
+            if is_apple_service_url(escrow_url):
+                entry["escrowProxyUrl"] = escrow_url
             # Normalise "com.apple.Dataclass.Foo" -> "foo" alongside the raw key.
             out.setdefault(name, entry)
             out.setdefault(name.rsplit(".", 1)[-1].lower(), entry)

@@ -17,6 +17,7 @@ from .. import const
 from ..proto import codec as _proto
 from ..proto.codec import Writer, decode_fields, first, first_str
 from ..proto.cuttlefish import encode_function_invoke_request
+from ..auth.http import secure_session
 from . import ckks
 from ..errors import AppleError
 
@@ -152,25 +153,6 @@ def _container_headers(*, bundle: str, container: str, database_scope: str = "Pr
     }
 
 
-def ck_app_init(container: str, bundle: str, dsid: str, mme_token: str, anisette,
-                *, timeout: int = 30) -> str:
-    """ckAppInit handshake -> the per-container `cloudKitUserId` CloudKit wants in
-    `x-cloudkit-userid` (it is NOT the dsid). Authed with Basic(dsid, mmeAuthToken)."""
-    headers = _container_headers(bundle=bundle, container=container)
-    headers["Authorization"] = "Basic " + base64.b64encode(
-        f"{dsid}:{mme_token}".encode()).decode()
-    headers.update(anisette.headers())
-    try:
-        resp = requests.post(CK_APP_INIT_URL, params={"container": container}, headers=headers,
-                             data="", verify=VERIFY_TLS, timeout=timeout)
-    except requests.RequestException as e:
-        raise CloudKitError(f"network error talking to ckAppInit: {e}") from e
-    if resp.status_code == 401:
-        raise CloudKitError("ckAppInit rejected the mmeAuthToken (HTTP 401) - re-run "
-                            "`icp login` to refresh it", http_status=401)
-    return resp.json()["cloudKitUserId"]
-
-
 class CloudKitError(AppleError):
     """A CloudKit transport/operation failure (network, HTTP, or a non-success result code)."""
 
@@ -180,6 +162,35 @@ class CloudKitError(AppleError):
         self.code = code
         self.description = description
         self.http_status = http_status
+
+
+def _reject_redirect(resp: requests.Response, operation: str) -> None:
+    if 300 <= resp.status_code < 400:
+        location = getattr(resp, "headers", {}).get("Location", "")
+        raise CloudKitError(
+            f"{operation} returned an unexpected redirect"
+            + (f" to {location!r}" if location else ""))
+
+
+def ck_app_init(container: str, bundle: str, dsid: str, mme_token: str, anisette,
+                *, timeout: int = 30, session: requests.Session | None = None) -> str:
+    """ckAppInit handshake -> the per-container `cloudKitUserId` CloudKit wants in
+    `x-cloudkit-userid` (it is NOT the dsid). Authed with Basic(dsid, mmeAuthToken)."""
+    headers = _container_headers(bundle=bundle, container=container)
+    headers["Authorization"] = "Basic " + base64.b64encode(
+        f"{dsid}:{mme_token}".encode()).decode()
+    headers.update(anisette.headers())
+    http = secure_session(verify=VERIFY_TLS, session=session)
+    try:
+        resp = http.post(CK_APP_INIT_URL, params={"container": container}, headers=headers,
+                         data="", timeout=timeout, allow_redirects=False)
+    except requests.RequestException as e:
+        raise CloudKitError(f"network error talking to ckAppInit: {e}") from e
+    _reject_redirect(resp, "ckAppInit")
+    if resp.status_code == 401:
+        raise CloudKitError("ckAppInit rejected the mmeAuthToken (HTTP 401) - re-run "
+                            "`icp login` to refresh it", http_status=401)
+    return resp.json()["cloudKitUserId"]
 
 
 @dataclasses.dataclass
@@ -222,7 +233,8 @@ class CloudKitTransport:
 
     def __init__(self, ck_token: str, user_id: str, device: DeviceConfig, anisette,
                  *, mme_client_info: str | None = None,
-                 container: str = CUTTLEFISH_CONTAINER, timeout: int = 30):
+                 container: str = CUTTLEFISH_CONTAINER, timeout: int = 30,
+                 session: requests.Session | None = None):
         self.ck_token = ck_token
         self.user_id = user_id
         self.device = device
@@ -230,6 +242,7 @@ class CloudKitTransport:
         self.container = container
         self.mme_client_info = mme_client_info
         self.timeout = timeout
+        self.http = secure_session(verify=VERIFY_TLS, session=session)
 
     def _headers(self, bundle: str, routing_hint: str | None = None) -> dict:
         """Shared container headers plus the two CKCode-invoke headers: x-cloudkit-userid
@@ -251,10 +264,11 @@ class CloudKitTransport:
         req = build_request_operation_generic(header, op_type, request_field, request_bytes)
         body = gzip.compress(delimit(req))
         try:
-            resp = requests.post(url, headers=self._headers(bundle, routing_hint),
-                                 data=body, verify=VERIFY_TLS, timeout=self.timeout)
+            resp = self.http.post(url, headers=self._headers(bundle, routing_hint),
+                                  data=body, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as e:
             raise CloudKitError(f"network error talking to {url}: {e}") from e
+        _reject_redirect(resp, "CloudKit request")
         messages = undelimit(maybe_gunzip(resp.content))
         result = parse_response_operation(messages[0])
         if not result.ok:

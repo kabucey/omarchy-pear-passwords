@@ -11,13 +11,12 @@ import json
 
 import requests
 import srp._pysrp as srp
-import urllib3
 
+from .endpoints import is_apple_service_url
 from ..errors import AppleError
 
 srp.rfc5054_enable()
 srp.no_username_in_x()
-urllib3.disable_warnings()
 
 AUTH_ENDPOINT = "https://idmsa.apple.com/appleauth/auth"
 SETUP_ENDPOINT = "https://setup.icloud.com/setup/ws/1"
@@ -46,6 +45,62 @@ class WebAuthError(AppleError):
     pass
 
 
+def _apple_cookie_domain(value: object) -> bool:
+    """Whether a persisted cookie domain belongs to an Apple auth/service host."""
+    if not isinstance(value, str) or not value:
+        return False
+    if value.startswith(".."):
+        return False
+    domain = value.lstrip(".").lower()
+    if any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789.-" for ch in domain):
+        return False
+    labels = domain.split(".")
+    if any(not label or label[0] == "-" or label[-1] == "-" for label in labels):
+        return False
+    return (domain == "apple.com" or domain.endswith(".apple.com")
+            or domain == "icloud.com" or domain.endswith(".icloud.com"))
+
+
+def _cookie_to_dict(cookie: requests.cookies.Cookie) -> dict:
+    """Serialize a cookie without collapsing its host/path scope."""
+    return {
+        "name": cookie.name,
+        "value": cookie.value,
+        "domain": cookie.domain,
+        "path": cookie.path,
+        "secure": bool(cookie.secure),
+        "expires": cookie.expires,
+        "discard": bool(cookie.discard),
+        "rest": dict(cookie._rest),
+    }
+
+
+def _cookie_from_dict(data: object) -> requests.cookies.Cookie | None:
+    """Restore one scoped cookie, or return None for malformed/untrusted data."""
+    if not isinstance(data, dict):
+        return None
+    name, value = data.get("name"), data.get("value")
+    domain, path = data.get("domain"), data.get("path")
+    secure, expires, discard = data.get("secure"), data.get("expires"), data.get("discard")
+    rest = data.get("rest", {})
+    if (not isinstance(name, str) or not name or not isinstance(value, str)
+            or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in name)
+            or not _apple_cookie_domain(domain)
+            or not isinstance(path, str) or not path.startswith("/")
+            or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path)
+            or not isinstance(secure, bool)
+            or (expires is not None and (isinstance(expires, bool) or not isinstance(expires, int)))
+            or not isinstance(discard, bool)
+            or not isinstance(rest, dict)):
+        return None
+    try:
+        return requests.cookies.create_cookie(
+            name=name, value=value, domain=domain, path=path, secure=secure,
+            expires=expires, discard=discard, rest=rest)
+    except (TypeError, ValueError):
+        return None
+
+
 def _derive_password_key(password: str, salt: bytes, iterations: int, protocol: str) -> bytes:
     """Apple's pre-SRP password KDF, identical to gsa.py's `_encrypt_password`."""
     p = hashlib.sha256(password.encode("utf-8")).digest()
@@ -70,19 +125,39 @@ class WebAuthSession:
     per-session `auth-<uuid>` threaded through the OAuth headers - generate once, persist, reuse."""
 
     def __init__(self, frame_tag: str, session_data: dict | None = None,
-                cookies: dict | None = None):
+                cookies: object | None = None):
         self.frame_tag = frame_tag
         self.session_data = dict(session_data or {})
         self.needs_2fa = False
+        # A pre-v1 export was a name -> value dict.  Never restore that shape: Requests
+        # treats those cookies as hostless and would send them to every redirect target.
+        self.cookies_need_reauth = False
         self.http = requests.Session()
-        self.http.verify = False
+        # idmsa.apple.com and setup.icloud.com use publicly trusted certificates. Keep the
+        # Requests default explicitly documented here because this session carries credentials
+        # and cookies through the entire web-auth and HME flow.
+        self.http.verify = True
+        # This session carries Apple credentials, session cookies, and trust tokens. Do not let
+        # process environment variables replace its CA bundle or route it through an arbitrary
+        # proxy: Requests' default trust_env=True would honor REQUESTS_CA_BUNDLE,
+        # CURL_CA_BUNDLE, and HTTPS_PROXY here.
+        self.http.trust_env = False
         self.http.headers["User-Agent"] = _USER_AGENT
-        if cookies:
-            requests.utils.add_dict_to_cookiejar(self.http.cookies, cookies)
+        if cookies is not None:
+            restored = []
+            if isinstance(cookies, list):
+                restored = [_cookie_from_dict(item) for item in cookies]
+                if any(cookie is None for cookie in restored):
+                    restored = []
+                    self.cookies_need_reauth = True
+            else:
+                self.cookies_need_reauth = True
+            for cookie in restored:
+                self.http.cookies.set_cookie(cookie)
 
     def export(self) -> dict:
         return {"frame_tag": self.frame_tag, "session_data": self.session_data,
-                "cookies": requests.utils.dict_from_cookiejar(self.http.cookies)}
+                "cookies": [_cookie_to_dict(cookie) for cookie in self.http.cookies]}
 
     def _auth_headers(self) -> dict:
         """For idmsa.apple.com calls: federate, signin/init, signin/complete, 2FA, trust."""
@@ -123,15 +198,28 @@ class WebAuthSession:
             if resp.headers.get(header):
                 self.session_data[key] = resp.headers[header]
 
+    @staticmethod
+    def _reject_redirect(resp: requests.Response, operation: str) -> None:
+        """Never follow or accept a redirect carrying auth state."""
+        if 300 <= resp.status_code < 400:
+            location = resp.headers.get("Location", "")
+            raise WebAuthError(
+                f"{operation} returned an unexpected redirect"
+                + (f" to {location!r}" if location else ""))
+
     def _get(self, url: str, *, headers: dict, params: dict | None = None) -> requests.Response:
-        resp = self.http.get(url, headers=headers, params=params, timeout=20)
+        resp = self.http.get(url, headers=headers, params=params, timeout=20,
+                             allow_redirects=False)
+        self._reject_redirect(resp, "Apple web-auth request")
         self._capture(resp)
         return resp
 
     def _post(self, url: str, *, headers: dict, params: dict | None = None,
               body: dict | None = None) -> requests.Response:
         data = json.dumps(body) if body is not None else None
-        resp = self.http.post(url, headers=headers, params=params, data=data, timeout=20)
+        resp = self.http.post(url, headers=headers, params=params, data=data, timeout=20,
+                              allow_redirects=False)
+        self._reject_redirect(resp, "Apple web-auth request")
         self._capture(resp)
         return resp
 
@@ -177,6 +265,12 @@ class WebAuthSession:
     def signin(self, username: str, password: str, trust_token: str | None = None) -> None:
         """Full SRP-6a sign-in: authorize/signin -> federate -> signin/init -> signin/complete.
         A 409 (HSA2 challenge pending) sets `self.needs_2fa` rather than raising."""
+        if self.cookies_need_reauth:
+            # A legacy export had no cookie scope.  Do not carry its session headers or
+            # trust token into the replacement login; this call establishes a fresh state.
+            self.session_data.clear()
+            trust_token = None
+            self.cookies_need_reauth = False
         username = username.lower()  # Apple lowercases the account name for the SRP proof
         self._auth_start()
         self._federate(username)
@@ -214,7 +308,8 @@ class WebAuthSession:
         devices. Required because idmsa's SRP 409 no longer auto-triggers the push; call once
         right after `signin()` reports `needs_2fa`, before prompting for a code."""
         resp = self.http.put(f"{AUTH_ENDPOINT}/verify/trusteddevice/securitycode",
-                             headers=self._auth_headers(), timeout=20)
+                             headers=self._auth_headers(), timeout=20, allow_redirects=False)
+        self._reject_redirect(resp, "Apple web-auth request")
         self._capture(resp)
         if not resp.ok:
             raise WebAuthError(f"could not request a 2FA push (HTTP {resp.status_code})")
@@ -236,6 +331,8 @@ class WebAuthSession:
     def account_login(self) -> dict:
         """POST .../accountLogin using the session token from signin(). Returns the parsed
         account payload (dsInfo, webservices, hsaChallengeRequired/hsaTrustedBrowser)."""
+        if self.cookies_need_reauth:
+            raise WebAuthError("saved web-session cookies need reauthentication")
         body = {"accountCountryCode": self.session_data.get("account_country"),
                "dsWebAuthToken": self.session_data.get("session_token"),
                "extended_login": True,
@@ -263,7 +360,20 @@ def hsa_challenge_required(account_data: dict) -> bool:
 
 def extract_webservices(account_data: dict) -> dict:
     """Flatten accountLogin's webservices map to {name: url}, e.g. 'premiummailsettings' -
-    the service the device auth path's get_account_settings map never includes."""
+    the service the device auth path's get_account_settings map never includes. Only retain
+    HTTPS endpoints on Apple's iCloud domain: these URLs come from the authenticated response
+    and are subsequently called with this session's cookies."""
     ws = account_data.get("webservices") or {}
     return {name: v["url"] for name, v in ws.items()
-            if isinstance(v, dict) and v.get("url") and v.get("status") != "off"}
+            if isinstance(v, dict) and _is_apple_webservice_url(v.get("url"))
+            and v.get("status") != "off"}
+
+
+def _is_apple_webservice_url(value: object) -> bool:
+    """Return whether a server-provided webservice URL stays inside Apple's HTTPS boundary.
+
+    The URL is used with the web-auth session, so accepting an arbitrary HTTPS URL would let a
+    changed account response redirect its cookies to an attacker-controlled site. Restrict the
+    host to the iCloud DNS boundary and reject URL features that could obscure the destination.
+    """
+    return is_apple_service_url(value)

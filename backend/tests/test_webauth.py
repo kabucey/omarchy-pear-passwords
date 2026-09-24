@@ -9,8 +9,11 @@ Run: .venv/bin/python -m unittest tests.test_webauth
 """
 
 import base64
+import os
 import unittest
 from unittest import mock
+
+import requests
 
 from icp.auth import webauth
 from icp.auth.webauth import WebAuthError, WebAuthSession, _derive_password_key
@@ -33,6 +36,83 @@ class _FakeResponse:
 
 def _session(**kw) -> WebAuthSession:
     return WebAuthSession("auth-test-frame", **kw)
+
+
+class TransportSecurityTests(unittest.TestCase):
+    def test_web_session_uses_verified_tls(self):
+        self.assertIs(_session().http.verify, True)
+
+    @mock.patch.dict(os.environ, {
+        "REQUESTS_CA_BUNDLE": "/tmp/attacker-ca.pem",
+        "CURL_CA_BUNDLE": "/tmp/attacker-ca.pem",
+        "HTTP_PROXY": "http://attacker-proxy.invalid:8080",
+        "HTTPS_PROXY": "http://attacker-proxy.invalid:8080",
+        "ALL_PROXY": "http://attacker-proxy.invalid:8080",
+    })
+    def test_environment_ca_and_proxy_settings_are_ignored(self):
+        sess = _session()
+        settings = sess.http.merge_environment_settings(
+            "https://idmsa.apple.com", {}, None, None, None)
+
+        self.assertFalse(sess.http.trust_env)
+        self.assertIs(settings["verify"], True)
+        self.assertEqual(settings["proxies"], {})
+
+    def test_cookie_export_preserves_scope_and_expiry(self):
+        sess = _session()
+        sess.http.cookies.set("aasp", "secret", domain="idmsa.apple.com", path="/",
+                             secure=True, expires=2000000000)
+        sess.http.cookies.set("hme", "alias", domain=".icloud.com", path="/v2",
+                             secure=True, expires=None)
+
+        restored = WebAuthSession("auth-test-frame", cookies=sess.export()["cookies"])
+        self.assertFalse(restored.cookies_need_reauth)
+        self.assertEqual(restored.http.cookies.get("aasp", domain="idmsa.apple.com", path="/"),
+                         "secret")
+        self.assertEqual(restored.http.cookies.get("hme", domain=".icloud.com", path="/v2"),
+                         "alias")
+        aasp = next(c for c in restored.http.cookies if c.name == "aasp")
+        self.assertEqual(aasp.expires, 2000000000)
+        self.assertTrue(aasp.secure)
+
+        request = requests.Request("GET", "https://evil.example/").prepare()
+        request.prepare_cookies(restored.http.cookies)
+        self.assertIsNone(request.headers.get("Cookie"))
+
+    def test_legacy_unscoped_cookie_dict_is_discarded(self):
+        sess = _session(session_data={"session_token": "stale"},
+                        cookies={"aasp": "secret"})
+        self.assertTrue(sess.cookies_need_reauth)
+        self.assertEqual(list(sess.http.cookies), [])
+        with self.assertRaisesRegex(WebAuthError, "reauthentication"):
+            sess.account_login()
+
+    def test_malformed_scoped_cookie_list_is_discarded(self):
+        sess = _session(cookies=[{"name": "aasp", "value": "secret"}])
+        self.assertTrue(sess.cookies_need_reauth)
+        self.assertEqual(list(sess.http.cookies), [])
+
+
+class RedirectTests(unittest.TestCase):
+    def test_auth_redirects_are_rejected_without_capturing_headers(self):
+        for status in (300, 301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                sess = _session()
+                seen = {}
+
+                def fake_post(url, **kwargs):
+                    seen.update(kwargs)
+                    return _FakeResponse(
+                        status, json_body={"ignored": True},
+                        headers={"Location": "https://evil.example/collect",
+                                 "X-Apple-Session-Token": "attacker-token"})
+
+                sess.http.post = fake_post
+                with self.assertRaises(WebAuthError):
+                    sess._post("https://idmsa.apple.com/appleauth/auth/federate",
+                               headers={}, body={"securityCode": {"code": "123456"}})
+                self.assertFalse(seen["allow_redirects"])
+                self.assertNotIn("session_token", sess.session_data)
 
 
 class DerivePasswordKeyTests(unittest.TestCase):
@@ -251,6 +331,18 @@ class ExtractWebservicesTests(unittest.TestCase):
         }}
         self.assertEqual(webauth.extract_webservices(data),
                          {"premiummailsettings": "https://p1-maildomainws.icloud.com"})
+
+    def test_drops_untrusted_webservice_urls(self):
+        data = {"webservices": {
+            "valid": {"url": "https://P1-MAILDOMAINWS.ICLOUD.COM", "status": "active"},
+            "plain_http": {"url": "http://p1-maildomainws.icloud.com", "status": "active"},
+            "wrong_domain": {"url": "https://icloud.com.attacker.test", "status": "active"},
+            "user_info": {"url": "https://attacker.test@p1-maildomainws.icloud.com",
+                           "status": "active"},
+            "wrong_port": {"url": "https://p1-maildomainws.icloud.com:8443", "status": "active"},
+        }}
+        self.assertEqual(webauth.extract_webservices(data),
+                         {"valid": "https://P1-MAILDOMAINWS.ICLOUD.COM"})
 
 
 class ExportTests(unittest.TestCase):

@@ -10,9 +10,10 @@ from icp.hme.client import HmeAlias, HmeClient, HmeError
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, json_body=None):
+    def __init__(self, status_code=200, json_body=None, headers=None):
         self.status_code = status_code
         self._json = json_body
+        self.headers = headers or {}
         self.ok = 200 <= status_code < 300
         self.reason = "error" if not self.ok else "OK"
 
@@ -26,9 +27,11 @@ class _FakeHttp:
     def __init__(self, response):
         self.response = response
         self.requested_urls = []
+        self.requested_kwargs = []
 
     def get(self, url, **kwargs):
         self.requested_urls.append(url)
+        self.requested_kwargs.append(kwargs)
         return self.response
 
 
@@ -90,6 +93,28 @@ class ListTests(unittest.TestCase):
         http = _FakeHttp(_FakeResponse(200, {"success": True, "result": {"hmeEmails": []}}))
         HmeClient("https://p1-maildomainws.icloud.com/", http).list()
         self.assertEqual(http.requested_urls, ["https://p1-maildomainws.icloud.com/v2/hme/list"])
+        self.assertFalse(http.requested_kwargs[0]["allow_redirects"])
+
+    def test_rejects_redirects_including_method_preserving_307_and_308(self):
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                http = _FakeHttp(_FakeResponse(
+                    status, {"success": True},
+                    headers={"Location": "https://evil.example/collect"}))
+                with self.assertRaisesRegex(HmeError, "redirect"):
+                    HmeClient("https://p1-maildomainws.icloud.com", http).list()
+                self.assertFalse(http.requested_kwargs[0]["allow_redirects"])
+
+    def test_rejects_invalid_service_url_at_use_boundary(self):
+        for url in (
+                "http://p1-maildomainws.icloud.com",
+                "https://evil.example",
+                "https://evil.example@p1-maildomainws.icloud.com",
+                "https://p1-maildomainws.icloud.com:8443",
+                "https://p1-maildomainws.icloud.com?next=evil",
+                "https://p1-maildomainws.icloud.com#fragment"):
+            with self.subTest(url=url), self.assertRaises(HmeError):
+                HmeClient(url, _FakeHttp(_FakeResponse()))
 
 
 if __name__ == "__main__":

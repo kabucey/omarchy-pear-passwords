@@ -23,6 +23,7 @@ class _FakeSession:
         self.session_data = dict(session_data or {})
         self.http = object()
         self.needs_2fa = False
+        self.cookies_need_reauth = False
         self.needs_2fa_after_signin = False
         self.signin_calls = []
         self.push_calls = 0
@@ -76,6 +77,24 @@ def test_stale_saved_session_falls_through_to_signin(monkeypatch):
 
     assert fake.signin_calls == [("alice", "secret", None)]
     assert data == {"stage": "fresh"}
+
+
+def test_legacy_unscoped_cookies_force_full_signin(monkeypatch):
+    fake = _FakeSession("auth-1", session_data={"session_token": "stale",
+                                                 "trust_token": "old-trust"})
+    fake.cookies_need_reauth = True
+    fake.account_login_results = [{"stage": "fresh"}]
+    monkeypatch.setattr(webauth, "WebAuthSession", lambda *a, **k: fake)
+    monkeypatch.setattr(webauth, "hsa_challenge_required", lambda data: False)
+
+    s = {"username": "alice", "password": "secret", "webauth": {
+        "session_data": {"session_token": "stale", "trust_token": "old-trust"},
+        "cookies": {"aasp": "legacy-cookie"},
+    }}
+    sess, data = app._ensure_web_session(s, interactive=False)
+
+    assert data == {"stage": "fresh"}
+    assert fake.signin_calls == [("alice", "secret", None)]
 
 
 def test_expired_session_signs_in_with_saved_password(monkeypatch):

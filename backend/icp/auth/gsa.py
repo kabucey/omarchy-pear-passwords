@@ -21,6 +21,7 @@ from . import ca
 from .anisette import Anisette
 from .device import Device
 from .headers import identity_headers
+from .http import secure_session
 from ..errors import AppleError
 
 # Apple's SRP variant.
@@ -35,9 +36,11 @@ class GSAError(AppleError):
 
 
 class GSAClient:
-    def __init__(self, device: Device, anisette: Anisette):
+    def __init__(self, device: Device, anisette: Anisette,
+                 session: requests.Session | None = None):
         self.device = device
         self.anisette = anisette
+        self.http = secure_session(verify=ca.bundle(), session=session)
         # Stashed for diagnostics (set by authenticate()).
         self.last_init_response: dict | None = None
         self.last_complete_response: dict | None = None
@@ -54,6 +57,15 @@ class GSAClient:
         cpd.update(identity_headers(self.device, self.anisette))
         return cpd
 
+    def _request_http(self, method: str, url: str, **kwargs) -> requests.Response:
+        resp = self.http.request(method, url, allow_redirects=False, **kwargs)
+        if 300 <= resp.status_code < 400:
+            location = getattr(resp, "headers", {}).get("Location", "")
+            raise GSAError(
+                "GSA request returned an unexpected redirect"
+                + (f" to {location!r}" if location else ""))
+        return resp
+
     def _request(self, parameters: dict) -> dict:
         body = {"Header": {"Version": "1.0.1"}, "Request": {"cpd": self._cpd()}}
         body["Request"].update(parameters)
@@ -63,9 +75,8 @@ class GSAClient:
             "User-Agent": const.GSA_USER_AGENT,
             "X-MMe-Client-Info": const.GSA_CLIENT_INFO,
         }
-        resp = requests.post(
-            const.GSA_ENDPOINT, headers=headers, data=plist.dumps(body),
-            verify=ca.bundle(), timeout=10,
+        resp = self._request_http(
+            "POST", const.GSA_ENDPOINT, headers=headers, data=plist.dumps(body), timeout=10,
         )
         return plist.loads(resp.content)["Response"]
 
@@ -103,10 +114,9 @@ class GSAClient:
 
     def trigger_trusted_factor(self, dsid: str, idms_token: str) -> bool:
         """Ask Apple to push a code to the trusted devices. True if it accepted the request."""
-        resp = requests.get(
-            "https://gsa.apple.com/auth/verify/trusteddevice",
-            headers=self._twofa_headers(dsid, idms_token),
-            verify=ca.bundle(), timeout=10,
+        resp = self._request_http(
+            "GET", "https://gsa.apple.com/auth/verify/trusteddevice",
+            headers=self._twofa_headers(dsid, idms_token), timeout=10,
         )
         # Logged unconditionally: a 200 with no notification arriving is the interesting case,
         # and it is invisible if only failures are recorded.
@@ -120,9 +130,9 @@ class GSAClient:
     def submit_trusted_factor(self, code: str, dsid: str, idms_token: str) -> bool:
         h = self._twofa_headers(dsid, idms_token)
         h["security-code"] = code
-        resp = requests.get(
-            "https://gsa.apple.com/grandslam/GsService2/validate",
-            headers=h, verify=ca.bundle(), timeout=10,
+        resp = self._request_http(
+            "GET", "https://gsa.apple.com/grandslam/GsService2/validate",
+            headers=h, timeout=10,
         )
         return resp.ok
 
@@ -135,7 +145,7 @@ class GSAClient:
         h = self._twofa_headers(dsid, idms_token)
         h["Accept"] = "application/json"
         try:
-            resp = requests.get("https://gsa.apple.com/auth", headers=h, verify=ca.bundle(), timeout=10)
+            resp = self._request_http("GET", "https://gsa.apple.com/auth", headers=h, timeout=10)
             data = resp.json() if resp.ok else {}
         except (requests.RequestException, ValueError):
             return []
@@ -155,7 +165,7 @@ class GSAClient:
         last = None
         for url in ("https://gsa.apple.com/auth/verify/phone",
                     "https://gsa.apple.com/auth/verify/phone/"):
-            resp = requests.put(url, json=body, headers=h, verify=ca.bundle(), timeout=10)
+            resp = self._request_http("PUT", url, json=body, headers=h, timeout=10)
             if resp.ok:
                 return
             last = resp
@@ -172,10 +182,9 @@ class GSAClient:
             "mode": "sms",
             "securityCode": {"code": code},
         }
-        resp = requests.post(
-            "https://gsa.apple.com/auth/verify/phone/securitycode",
-            json=body, headers=self._twofa_headers(dsid, idms_token),
-            verify=ca.bundle(), timeout=10,
+        resp = self._request_http(
+            "POST", "https://gsa.apple.com/auth/verify/phone/securitycode",
+            json=body, headers=self._twofa_headers(dsid, idms_token), timeout=10,
         )
         return resp.ok
 
