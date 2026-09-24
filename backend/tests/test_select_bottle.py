@@ -61,6 +61,15 @@ def test_single_bottle_is_not_asked(monkeypatch):
     assert not [m for m in sent if m.get("need")]
 
 
+def test_device_chosen_stage_can_include_device_name(monkeypatch):
+    sent = _json_frontend(monkeypatch, "0")
+    ui.stage("device_chosen", name="Alex's iPhone", model="iPhone 16 Pro",
+             secret="passcode")
+    assert sent == [{"event": "stage", "stage": "device_chosen",
+                     "name": "Alex's iPhone", "model": "iPhone 16 Pro",
+                     "secret": "passcode"}]
+
+
 def test_label_prefers_own_name_and_tells_similar_devices_apart():
     from datetime import datetime
     b = {"meta": {"serial": "F4GXXXXX7XQ2", "com.apple.securebackup.timestamp": "2026-09-03 10:22:31",

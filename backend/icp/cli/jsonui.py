@@ -56,8 +56,8 @@ class JsonFrontend:
         reply = self._await({"need": "confirm", "kind": kind, "prompt": prompt, "detail": detail})
         return reply.strip().lower() in ("y", "yes", "true")
 
-    def stage(self, name: str, **info) -> None:
-        self._send({"event": "stage", "stage": name, **info})
+    def stage(self, stage_name: str, **info) -> None:
+        self._send({"event": "stage", "stage": stage_name, **info})
 
     def choose(self, prompt: str, options: list, kind=None, details=None):
         reply = self._await({"need": "choice", "kind": kind, "prompt": prompt,
