@@ -72,11 +72,11 @@ def confirm_yn(msg: str, kind: str | None = None, detail: str | None = None) -> 
     return input(msg).strip().lower() in ("y", "yes")
 
 
-def stage(name: str, **info) -> None:
+def stage(stage_name: str, **info) -> None:
     """Where the sign-in flow has got to. A GUI draws progress from these; the terminal already
     prints its own step lines, so here it is a no-op."""
     if _frontend is not None and hasattr(_frontend, "stage"):
-        _frontend.stage(name, **info)
+        _frontend.stage(stage_name, **info)
 
 
 def choose(prompt: str, options: list, kind: str | None = None, details: list | None = None):
