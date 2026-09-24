@@ -18,9 +18,11 @@ Two rules shape the whole file:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import secrets
 import sys
 import time
 
@@ -54,6 +56,148 @@ def _runtime_dir() -> str:
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o700)
     return d
+
+
+def _clipboard_owner_path() -> str:
+    """The non-secret state for the one clipboard source Pear currently owns."""
+    return os.path.join(_runtime_dir(), "clipboard-owner.json")
+
+
+def _clipboard_owner_lock_path() -> str:
+    return os.path.join(_runtime_dir(), "clipboard-owner.lock")
+
+
+def _acquire_clipboard_owner_lock() -> int | None:
+    """Serialize marker replacement with ownership checks and removal."""
+    fd = None
+    try:
+        path = _clipboard_owner_lock_path()
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.chmod(path, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+    except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return None
+
+
+def _release_clipboard_owner_lock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _process_start_time(pid: int) -> str | None:
+    """Return Linux's per-process start cookie, or None if the process is gone."""
+    try:
+        # /proc/<pid>/stat has a parenthesised comm field, so split from its final ')'.
+        with open(f"/proc/{pid}/stat") as fh:
+            fields = fh.read().rsplit(")", 1)[1].split()
+        return fields[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _process_name(pid: int) -> str | None:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            command = fh.read().split(b"\0", 1)[0]
+        return os.path.basename(os.fsdecode(command)) if command else None
+    except OSError:
+        return None
+
+
+def _clipboard_owner_is_alive(state: dict) -> bool:
+    """Only claim a PID if it is still the exact wl-copy process we started."""
+    try:
+        pid = int(state["pid"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (_process_start_time(pid) == str(state.get("start_time"))
+            and _process_name(pid) == state.get("tool"))
+
+
+def _write_clipboard_owner(token: str, pid: int, tool: str) -> bool:
+    path = _clipboard_owner_path()
+    tmp = f"{path}.{os.getpid()}.tmp"
+    lock_fd = _acquire_clipboard_owner_lock()
+    if lock_fd is None:
+        return False
+    try:
+        start_time = _process_start_time(pid)
+        if start_time is None:
+            return False
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"token": token, "pid": pid, "start_time": start_time,
+                       "tool": os.path.basename(tool)}, fh)
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    finally:
+        _release_clipboard_owner_lock(lock_fd)
+
+
+def _remove_clipboard_owner_marker(path: str) -> bool:
+    """Remove a marker while the caller holds the owner lock."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    return True
+
+
+def _clear_clipboard_owner(token: str | None = None) -> bool:
+    """Release Pear's source only; never issue wl-copy --clear against another owner.
+
+    A timer for an older copy supplies its token, so it cannot clear a newer Pear copy. The
+    expiry action omits the token and releases whichever *current* source is still verifiably
+    the wl-copy process Pear launched. If another application replaced it, wl-copy is gone (or
+    the PID/start cookie no longer matches) and this is a safe no-op.
+    """
+    path = _clipboard_owner_path()
+    lock_fd = _acquire_clipboard_owner_lock()
+    if lock_fd is None:
+        return False
+    try:
+        try:
+            with open(path) as fh:
+                state = json.load(fh)
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError):
+            # A malformed state file cannot prove ownership. Leave it in place: a concurrent copy
+            # may already have replaced it, and report failure so the UI does not silently claim
+            # the cleanup succeeded.
+            return False
+        if not isinstance(state, dict):
+            return False
+        if token is not None and state.get("token") != token:
+            return True
+        if _clipboard_owner_is_alive(state):
+            import signal
+            try:
+                os.kill(int(state["pid"]), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except (OSError, KeyError, TypeError, ValueError):
+                return False
+        return _remove_clipboard_owner_marker(path)
+    finally:
+        _release_clipboard_owner_lock(lock_fd)
 
 
 def _app_session_path() -> str:
@@ -329,8 +473,9 @@ def cmd_app_copy(args) -> int:
     """Put the password on the clipboard without ever returning it.
 
     The UI asks for a copy and gets back only a confirmation, so the secret never enters the
-    front end at all. Cleared after `seconds` by a detached child, which also survives this
-    process exiting immediately.
+    front end at all. A foreground wl-copy child owns the selection. We retain only its PID,
+    start cookie and a random token, so expiry and the detached timer can release that exact
+    source without clobbering a clipboard that another application has since claimed.
     """
     if not _app_session_ok():
         return _locked_reply()
@@ -354,18 +499,51 @@ def cmd_app_copy(args) -> int:
     if not value:
         json.dump({"ok": False, "error": f"no {field} on this entry"}, sys.stdout)
         return 1
-    # Only a password is worth wiping; clearing the clipboard after someone copies their
-    # own username would just be rude.
     seconds = getattr(args, "seconds", 30) if field == "password" else 0
-    subprocess.run([tool], input=value.encode(), check=False)
-    # -o makes wl-copy clear itself after the next paste; the timer is the backstop for a
-    # password that is copied and then never used.
+    # Replace an earlier Pear source before starting the new one. This only signals the
+    # verifiably-owned wl-copy process recorded in our runtime state.
+    _clear_clipboard_owner()
+    token = secrets.token_hex(16)
+    try:
+        owner = subprocess.Popen(
+            [tool, "--foreground"], stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        owner.stdin.write(value.encode())
+        owner.stdin.close()
+    except (OSError, BrokenPipeError):
+        try:
+            owner.terminate()
+        except (UnboundLocalError, OSError):
+            pass
+        json.dump({"ok": False, "error": "could not copy to the clipboard"}, sys.stdout)
+        return 1
+    if owner.poll() is not None or not _write_clipboard_owner(token, owner.pid, tool):
+        try:
+            owner.terminate()
+        except OSError:
+            pass
+        json.dump({"ok": False, "error": "could not keep clipboard ownership"}, sys.stdout)
+        return 1
     if seconds:
-        subprocess.Popen(
-            ["sh", "-c", f"sleep {int(seconds)}; {tool} --clear >/dev/null 2>&1 || true"],
-            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "icp", "app-clipboard-clear", "--token", token,
+                 "--delay", str(int(seconds))],
+                start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            _clear_clipboard_owner(token)
+            json.dump({"ok": False, "error": "could not schedule clipboard cleanup"}, sys.stdout)
+            return 1
     json.dump({"ok": True, "id": args.id, "field": field, "clears_in": seconds}, sys.stdout)
     return 0
+
+
+def cmd_app_clipboard_clear(args) -> int:
+    """Release the current Pear clipboard owner after an optional detached delay."""
+    delay = max(0, int(getattr(args, "delay", 0) or 0))
+    if delay:
+        time.sleep(delay)
+    return 0 if _clear_clipboard_owner(getattr(args, "token", None)) else 1
 
 
 def _stdout_to_stderr():

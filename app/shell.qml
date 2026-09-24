@@ -98,47 +98,232 @@ ShellRoot {
 
     // ---------------------------------------------------------------- process plumbing
     property var queue: []
+    // A command may outlive the view that asked for it (a sync can take minutes). Every
+    // callback captures the generation that was current when it was requested. Expiry and
+    // selection changes advance it, so a late reply can finish in the child process without
+    // putting old secrets back into this window.
+    property int callbackGeneration: 0
+    property int editorGeneration: 0
+    property bool clipboardClearPending: false
+    property bool clipboardClearRequested: false
+    property bool clipboardMustStayClear: false
+    property int clipboardRetryCount: 0
+    readonly property int clipboardRetryLimit: 3
 
-    function run(args, stdinText, done) {
-        if (proc.running) {
-            root.queue = root.queue.concat([{ args: args, stdinText: stdinText, done: done }]);
-            return;
-        }
-        proc.handler = done;
+    function invalidateAppCallbacks() {
+        root.callbackGeneration += 1;
+        // Do not stop a process that may already be writing remotely. Its callback is dropped,
+        // while queued work (which has not started) and its secret-bearing closures are released.
+        root.queue = [];
+        proc.handler = null;
+        // If it has not started, this is still the command's plaintext stdin. If it has started,
+        // onStarted already handed it to the child and cleared the property; clearing it here
+        // therefore never interrupts an in-flight remote write.
+        proc.pending = "";
+        proc.output = "";
+        // A FailedToStart transition emits runningChanged without onExited. There is no child
+        // left to finish, so release the attempt and its busy marker immediately when that
+        // transition has already happened. A running child is deliberately left alone: an
+        // in-flight remote write still owns its framed stdin.
+        if (!proc.running) { proc.attemptActive = false; root.busy = false; }
+    }
+
+    function invalidateEditorCallbacks() {
+        root.editorGeneration += 1;
+        // An editor write may still be in flight. Dropping only the UI handler lets that write
+        // finish with the payload already handed to edProc, without reopening the sheet or
+        // copying its result into a new editor.
+        edProc.handler = null;
+        edProc.pending = "";
+        edProc.output = "";
+        if (!edProc.running) edProc.attemptActive = false;
+        previewDebounce.stop();
+    }
+
+    function failProcStart(attempt) {
+        if (proc.running || !proc.attemptActive || proc.attempt !== attempt) return;
+        proc.attemptActive = false;
+        proc.handler = null;
+        proc.pending = "";
+        proc.output = "";
+        root.busy = false;
+        // A failed start can have been carrying an editor payload through the shared process.
+        // Use the same fail-closed path as the clock boundary, then expose only a generic
+        // status; no callback is allowed to repopulate a secret-bearing control.
+        root.forgetSecrets();
+        root.status = "couldn't start icp";
+    }
+
+    function failEditorStart(attempt) {
+        if (edProc.running || !edProc.attemptActive || edProc.attempt !== attempt) return;
+        edProc.attemptActive = false;
+        root.invalidateEditorCallbacks();
+        root.editorOpen = false;
+        root.editorMode = "";
+        root.clearEditorFields();
+        root.status = "couldn't start icp";
+    }
+
+    function clearClipboard() {
+        root.clipboardClearRequested = true;
+        if (clipboardProc.running || root.clipboardClearPending) return;
+        root.clipboardClearRequested = false;
+        root.clipboardClearPending = true;
+        clipboardProc.attempt += 1;
+        clipboardProc.running = true;
+    }
+
+    function scheduleClipboardRetry() {
+        if (!root.clipboardMustStayClear || root.clipboardRetryCount >= root.clipboardRetryLimit)
+            return false;
+        root.clipboardRetryCount += 1;
+        clipboardRetryTimer.restart();
+        return true;
+    }
+
+    function failClipboardStart(attempt) {
+        if (clipboardProc.running || !root.clipboardClearPending
+            || clipboardProc.attempt !== attempt) return;
+        root.clipboardClearPending = false;
+        if (root.scheduleClipboardRetry()) return;
+        root.status = "clipboard could not be cleared";
+    }
+
+    function startRun(q) {
+        proc.handler = q.handler;
         // Newline-terminated: the backend reads exactly one line. It used to read to EOF,
         // and since this pipe stays open the process waited in read() forever.
-        proc.pending = stdinText && stdinText.length ? stdinText + "\n" : "";
-        proc.command = [root.icp].concat(args);
+        proc.stdinEnabled = true;
+        proc.pending = q.stdinText && q.stdinText.length ? q.stdinText + "\n" : "";
+        proc.output = "";
+        proc.command = [root.icp].concat(q.args);
+        proc.attempt += 1;
+        proc.attemptActive = true;
         root.busy = true;
         proc.running = true;
+    }
+
+    function run(args, stdinText, done) {
+        const generation = root.callbackGeneration;
+        const handler = function (d) {
+            if (generation !== root.callbackGeneration) return;
+            if (done) done(d);
+        };
+        const q = { args: args, stdinText: stdinText, handler: handler, generation: generation };
+        if (proc.running) {
+            root.queue = root.queue.concat([q]);
+            return;
+        }
+        root.startRun(q);
     }
 
     function drain() {
         if (!root.queue.length || proc.running) return;
         const q = root.queue[0];
         root.queue = root.queue.slice(1);
-        root.run(q.args, q.stdinText, q.done);
+        // Expiry/selection normally removes these before drain runs. Keep this guard for the
+        // event-loop turn where a child exits at the same time as the clock transition.
+        if (q.generation !== root.callbackGeneration) { Qt.callLater(root.drain); return; }
+        root.startRun(q);
     }
 
     Process {
         id: proc
         property var handler: null
         property string pending: ""
+        // SplitParser does not expose the process reader's persistent buffer. This accumulator
+        // exists only between the first output chunk and onExited, and is cleared on both paths.
+        property string output: ""
+        property int attempt: 0
+        property bool attemptActive: false
         running: false
         stdinEnabled: true
-        onStarted: { if (pending.length) write(pending); stdinEnabled = false; }
-        stdout: StdioCollector {
-            onStreamFinished: {
-                root.busy = false;
-                let d = null;
-                try { d = JSON.parse(this.text); } catch (e) {}
-                if (!d) { root.status = "no reply from icp"; return; }
-                if (d.ok === false) { root.status = d.error || "failed"; return; }
-                root.status = "";
-                if (proc.handler) proc.handler(d);
+        onRunningChanged: {
+            if (running || !proc.attemptActive) return;
+            // Quickshell emits onExited before the normal running=false transition. A
+            // FailedToStart has no onExited, so defer one event-loop turn and distinguish the
+            // two cases by the attempt flag instead of dropping a valid reply.
+            const attempt = proc.attempt;
+            Qt.callLater(function () {
+                if (!proc.running && proc.attemptActive && proc.attempt === attempt)
+                    root.failProcStart(attempt);
+            });
+        }
+        onStarted: {
+            if (pending.length) { write(pending); pending = ""; }
+            stdinEnabled = false;
+        }
+        stdout: SplitParser {
+            // App commands emit one JSON object without a required trailing newline. Empty
+            // splitting forwards each chunk and leaves no parser-side plaintext buffer behind.
+            splitMarker: ""
+            onRead: function (data) {
+                // Expiry clears the handler before any late stream event can run. Do not let
+                // that event repopulate the short-lived accumulator.
+                if (!proc.handler) return;
+                proc.output += data;
             }
         }
-        onExited: { root.busy = false; Qt.callLater(root.drain); }
+        onExited: {
+            proc.attemptActive = false;
+            root.busy = false;
+            const handler = proc.handler;
+            const output = proc.output;
+            proc.handler = null;
+            proc.output = "";
+            // A handler of null means expiry/selection invalidated this reply. Do not even
+            // update status in that case: the old command no longer owns the window.
+            if (handler) {
+                let d = null;
+                try { d = JSON.parse(output); } catch (e) {}
+                if (!d) root.status = "no reply from icp";
+                else if (d.ok === false) root.status = d.error || "failed";
+                else { root.status = ""; handler(d); }
+            }
+            Qt.callLater(root.drain);
+            // A copy command may have been inside proc when the clock expired. Its callback is
+            // intentionally dropped, but the backend can still finish and create a new Pear
+            // clipboard owner after the first clear attempt. Queue one dedicated retry so that
+            // a completed remote write cannot repopulate the clipboard past the boundary.
+            if (root.clipboardMustStayClear) root.clearClipboard();
+        }
+    }
+
+    // Clipboard cleanup is deliberately outside proc/queue: expiry must not wait behind a
+    // network write. The backend only terminates the foreground wl-copy process it owns; if a
+    // different application replaced the selection, this action is a safe no-op.
+    Process {
+        id: clipboardProc
+        property int attempt: 0
+        command: [root.icp, "app-clipboard-clear"]
+        running: false
+        stdinEnabled: false
+        onRunningChanged: {
+            if (running) return;
+            const attempt = clipboardProc.attempt;
+            Qt.callLater(function () {
+                if (!clipboardProc.running && root.clipboardClearPending
+                    && clipboardProc.attempt === attempt)
+                    root.failClipboardStart(attempt);
+            });
+        }
+        onExited: function (exitCode, exitStatus) {
+            root.clipboardClearPending = false;
+            clipboardRetryTimer.stop();
+            root.clipboardRetryCount = 0;
+            if (exitCode !== 0) root.status = "clipboard could not be cleared";
+            if (root.clipboardClearRequested) Qt.callLater(root.clearClipboard);
+        }
+    }
+
+    Timer {
+        id: clipboardRetryTimer
+        interval: 100
+        repeat: false
+        onTriggered: {
+            if (root.clipboardMustStayClear && !clipboardProc.running
+                && !root.clipboardClearPending) root.clearClipboard();
+        }
     }
 
     Timer {
@@ -149,11 +334,13 @@ ShellRoot {
             root.unlockLeft = Math.max(0, Math.ceil(root.fullUntil - now));
             root.sessionLeft = Math.max(0, Math.ceil(root.sessionUntil - now));
             // The scan stopped counting: put the secrets away, keep the list.
-            if (wasUnlocked && root.unlockLeft === 0 && !root.busy && root.queue.length === 0)
+            if (wasUnlocked && root.unlockLeft === 0) {
+                root.clipboardMustStayClear = true;
+                root.clearClipboard();
                 root.forgetSecrets();
+            }
             // And when the session runs out, the window locks and the backend stops sending.
-            if (root.appUnlocked && root.sessionUntil > 0 && root.sessionLeft === 0
-                && !root.busy && root.queue.length === 0) root.lockApp();
+            if (root.appUnlocked && root.sessionUntil > 0 && root.sessionLeft === 0) root.lockApp();
             if (root.totpLeft > 0) root.totpLeft -= 1;
         }
     }
@@ -164,14 +351,40 @@ ShellRoot {
         id: edProc
         property var handler: null
         property string pending: ""
+        property string output: ""
+        property int attempt: 0
+        property bool attemptActive: false
         running: false
         stdinEnabled: true
-        onStarted: { if (pending.length) write(pending); }
-        stdout: StdioCollector {
-            onStreamFinished: {
+        onRunningChanged: {
+            if (running || !edProc.attemptActive) return;
+            const attempt = edProc.attempt;
+            Qt.callLater(function () {
+                if (!edProc.running && edProc.attemptActive && edProc.attempt === attempt)
+                    root.failEditorStart(attempt);
+            });
+        }
+        onStarted: {
+            if (pending.length) { write(pending); pending = ""; }
+            stdinEnabled = false;
+        }
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: function (data) {
+                if (!edProc.handler) return;
+                edProc.output += data;
+            }
+        }
+        onExited: {
+            edProc.attemptActive = false;
+            const handler = edProc.handler;
+            const output = edProc.output;
+            edProc.handler = null;
+            edProc.output = "";
+            if (handler) {
                 let d = null;
-                try { d = JSON.parse(this.text); } catch (e) {}
-                if (edProc.handler) edProc.handler(d || { ok: false, error: "no reply from the backend" });
+                try { d = JSON.parse(output); } catch (e) {}
+                handler(d || { ok: false, error: "no reply from the backend" });
             }
         }
     }
@@ -197,6 +410,8 @@ ShellRoot {
     Process {
         id: authProc
         property bool restartAfterExit: false
+        property int attempt: 0
+        property bool attemptActive: false
         running: false
         command: [root.icp, "app-auth"]
         stdout: StdioCollector {
@@ -213,11 +428,22 @@ ShellRoot {
                 else root.status = "cancelled";
             }
         }
+        onRunningChanged: {
+            if (running || !authProc.attemptActive) return;
+            const attempt = authProc.attempt;
+            Qt.callLater(function () {
+                if (!authProc.running && authProc.attemptActive && authProc.attempt === attempt)
+                    root.failAuthStart(attempt);
+            });
+        }
         onExited: {
+            authProc.attemptActive = false;
             root.authing = false;
             if (restartAfterExit) {
                 restartAfterExit = false;
                 root.authing = true;
+                authProc.attempt += 1;
+                authProc.attemptActive = true;
                 running = true;
             }
         }
@@ -282,6 +508,8 @@ ShellRoot {
 
     Process {
         id: signin
+        property int attempt: 0
+        property bool attemptActive: false
         running: false
         stdinEnabled: true
         stdout: SplitParser {
@@ -316,6 +544,7 @@ ShellRoot {
                 if (m.event === "done") {
                     root.signinRunning = false;
                     root.signinNeed = "";
+                    signinField.text = ""; codeField.text = "";
                     root.signinOutcome = m.cancelled ? "cancelled" : (m.ok ? "ok" : "error");
                     if (m.cancelled) root.signinOpen = false;
                     if (m.ok) root.refresh();
@@ -326,8 +555,18 @@ ShellRoot {
                 if (m.event) root.signinLogPush(m.event, m.text || "");
             }
         }
+        onRunningChanged: {
+            if (running || !signin.attemptActive) return;
+            const attempt = signin.attempt;
+            Qt.callLater(function () {
+                if (!signin.running && signin.attemptActive && signin.attempt === attempt)
+                    root.failSigninStart(attempt);
+            });
+        }
         onExited: {
+            signin.attemptActive = false;
             root.signinRunning = false;
+            signinField.text = ""; codeField.text = "";
             if (root.signinOutcome === "" && root.signinOpen) root.signinOutcome = "error";
         }
     }
@@ -389,6 +628,14 @@ ShellRoot {
     // its own process, and pressing Unlock while one is pending kills it and starts over.
     property bool authing: false
 
+    function failAuthStart(attempt) {
+        if (authProc.running || !authProc.attemptActive || authProc.attempt !== attempt) return;
+        authProc.attemptActive = false;
+        authProc.restartAfterExit = false;
+        root.authing = false;
+        root.status = "couldn't start authentication";
+    }
+
     function authenticate() {
         root.status = "waiting for authentication…";
         if (authProc.running) {
@@ -397,6 +644,8 @@ ShellRoot {
             return;
         }
         root.authing = true;
+        authProc.attempt += 1;
+        authProc.attemptActive = true;
         authProc.running = true;
     }
 
@@ -443,27 +692,62 @@ ShellRoot {
         const now = Date.now() / 1000;
         root.unlockLeft = Math.max(0, Math.ceil(root.fullUntil - now));
         root.sessionLeft = Math.max(0, Math.ceil(root.sessionUntil - now));
+        if (root.unlockLeft > 0) {
+            root.clipboardMustStayClear = false;
+            root.clipboardClearRequested = false;
+            root.clipboardRetryCount = 0;
+            clipboardRetryTimer.stop();
+        }
     }
 
-    // The scan stopped counting. Everything on screen that came from it goes.
+    // Text controls keep their value even while their sheet is hidden. Clear every editor
+    // before hiding it, including fields whose contents are only secret in some modes (notes,
+    // setup links and the create form). Do not clear edProc.pending: a process that already
+    // started may still need that exact payload to finish an in-flight remote write.
+    function clearEditorFields() {
+        previewDebounce.stop();
+        edArea.text = ""; edSetup.text = "";
+        crName.text = ""; crSite.text = ""; crUser.text = ""; crPass.text = "";
+        crNotes.text = ""; crSetup.text = "";
+        root.totpPreview = ({});
+        root.editorError = "";
+        root.editorBusy = false; root.editorScanning = false; root.createMore = false;
+        previewDebounce.stop();
+    }
+
+    // The scan stopped counting. Everything on screen that came from it goes. In particular,
+    // this path never waits for the command queue: the clock is a security boundary even while
+    // a network write or a stuck helper is running.
     function forgetSecrets() {
+        root.invalidateAppCallbacks();
+        root.invalidateEditorCallbacks();
         root.revealed = ""; root.totpCode = ""; root.totpLeft = 0;
         root.notesText = ""; root.notesLoaded = false;
         root.historyRows = []; root.revealedHistory = ({}); root.historyLoaded = false;
         root.confirming = false; root.changing = false; root.generated = false;
         root.renaming = false;
         newPw.text = "";
+        nickField.text = "";
+        // Sign-in is a separate long-lived flow and remains open, but a password or code that
+        // is waiting for the user is still a secret and must be re-entered after expiry.
+        if (root.signinNeed === "secret" || root.signinKind === "password"
+            || root.signinKind === "device_passcode")
+            signinField.text = "";
+        codeField.text = "";
+        root.editorOpen = false; root.editorMode = "";
+        root.clearEditorFields();
     }
 
     // Out of time: back to the locked window, with nothing in it.
     function lockApp() {
+        root.clipboardMustStayClear = true;
+        root.clearClipboard();
         root.forgetSecrets();
         root.appUnlocked = false;
         root.autoAuthTried = true;            // don't re-prompt on our own; the screen invites it
         root.fullUntil = 0; root.sessionUntil = 0; root.unlockLeft = 0; root.sessionLeft = 0;
         root.entries = []; root.filtered = [];
-        root.clearSelection();
-        root.editorOpen = false;
+        root.selected = null; root.selectedId = ""; root.detailIndex = 0;
         search.text = "";
     }
 
@@ -520,7 +804,12 @@ ShellRoot {
     function copyPassword() { root.copyField("password", "Password"); }
 
     function generatePassword() {
+        const generation = root.callbackGeneration;
+        newPw.text = ""; root.generated = false;
         run(["app-generate"], "", function (d) {
+            if (generation !== root.callbackGeneration || (!root.changing && !root.confirming)
+                || newPw.text.length)
+                return;
             newPw.text = d.password;
             root.generated = true;
             root.flash = "generated — " + d.entropy_bits + " bits, one digit, one capital";
@@ -547,6 +836,31 @@ ShellRoot {
     // Sign-in is driven entirely by whatever the backend asks for: it emits a prompt, we
     // render it, we answer. The UI deliberately knows nothing about Apple's sequence, so a
     // step added later needs no change here.
+    function failSigninStart(attempt) {
+        if (signin.running || !signin.attemptActive || signin.attempt !== attempt) return;
+        signin.attemptActive = false;
+        root.signinRunning = false;
+        root.signinStage = "";
+        root.signinNeed = "";
+        root.signinKind = "";
+        root.signinDefault = "";
+        root.signinDetail = "";
+        root.signinOptions = [];
+        root.signinDetails = [];
+        root.signinDevice = ({});
+        root.signinChoice = -1;
+        root.signinVia = "trusted";
+        root.signinCount = -1;
+        root.signinVerified = false;
+        root.signinError = "couldn't start sign-in";
+        root.signinWarnings = [];
+        root.signinLog = [];
+        root.signinShowDetails = false;
+        root.signinOutcome = "error";
+        signinField.text = ""; codeField.text = "";
+        root.status = "couldn't start sign-in";
+    }
+
     function startSignin(mode) {
         root.signinMode = mode;
         root.signinOpen = true;
@@ -559,6 +873,8 @@ ShellRoot {
         root.signinDevice = ({});
         signinField.text = ""; codeField.text = "";
         signin.command = [root.icp, "app-signin", "--mode", mode];
+        signin.attempt += 1;
+        signin.attemptActive = true;
         signin.running = true;
     }
 
@@ -573,6 +889,7 @@ ShellRoot {
 
     function signinCancel() {
         if (root.signinRunning) signin.write(JSON.stringify({ cancel: true }) + "\n");
+        signinField.text = ""; codeField.text = "";
         root.signinOpen = false;
     }
 
@@ -915,6 +1232,8 @@ ShellRoot {
     }
 
     function openEditor(mode) {
+        root.invalidateEditorCallbacks();
+        root.clearEditorFields();
         root.editorMode = mode; root.editorError = ""; root.totpPreview = ({});
         root.editorBusy = false; root.editorScanning = false; root.createMore = false;
         edArea.text = mode === "sites" ? (root.selected ? (root.selected.sites || []).join("\n") : "")
@@ -925,13 +1244,21 @@ ShellRoot {
             crNotes.text = ""; crSetup.text = "";
         }
         root.editorOpen = true;
+        const generation = root.editorGeneration;
         Qt.callLater(function () {
+            if (!root.editorOpen || generation !== root.editorGeneration || root.editorMode !== mode) return;
             if (mode === "create") crName.forceActiveFocus();
             else if (mode === "totp") edSetup.forceActiveFocus();
             else edArea.forceActiveFocus();
         });
     }
-    function closeEditor() { if (!root.editorBusy) root.editorOpen = false; }
+    function closeEditor() {
+        if (root.editorBusy) return;
+        root.editorOpen = false;
+        root.invalidateEditorCallbacks();
+        root.clearEditorFields();
+        root.editorMode = "";
+    }
 
     function editorTitle() {
         switch (root.editorMode) {
@@ -943,7 +1270,7 @@ ShellRoot {
         return "";
     }
     function editorReady() {
-        if (root.editorBusy || root.editorScanning) return false;
+        if (root.editorBusy || root.editorScanning || edProc.running) return false;
         if (root.editorMode === "totp") return !!root.totpPreview.code;
         if (root.editorMode === "create")
             return crPass.text.length > 0 && (crSite.text.trim().length > 0 || crName.text.trim().length > 0)
@@ -968,41 +1295,76 @@ ShellRoot {
             payload = { title: crName.text, site: crSite.text, username: crUser.text,
                         password: crPass.text, notes: crNotes.text, setup: crSetup.text };
         }
+        const mode = root.editorMode;
+        const generation = root.editorGeneration;
         root.editorBusy = true;
-        root.edRun(args, JSON.stringify(payload), function (d) {
+        if (!root.edRun(args, JSON.stringify(payload), function (d) {
+            if (!root.editorOpen || root.editorMode !== mode || root.editorGeneration !== generation
+                || (mode !== "create" && root.selectedId !== id)) return;
             root.editorBusy = false;
             if (d.ok === false) { root.editorError = d.error || "Couldn't save"; return; }
-            if (root.editorMode === "notes") { root.notesText = edArea.text.replace(/^\n+|\n+$/g, ""); root.notesLoaded = true; }
-            if (root.editorMode === "totp") { root.totpCode = ""; }
-            if (root.editorMode === "create" && d.id) { root.selectedId = d.id; root.selected = null; }
+            if (mode === "notes") { root.notesText = payload.notes.replace(/^\n+|\n+$/g, ""); root.notesLoaded = true; }
+            if (mode === "totp") { root.totpCode = ""; }
+            if (mode === "create" && d.id) { root.selectedId = d.id; root.selected = null; }
             root.editorOpen = false;
-            root.flash = root.editorMode === "create" ? "Added to iCloud Keychain" : "Saved to iCloud — on all your devices";
+            root.invalidateEditorCallbacks();
+            root.clearEditorFields();
+            root.editorMode = "";
+            root.flash = mode === "create" ? "Added to iCloud Keychain" : "Saved to iCloud — on all your devices";
             flashTimer.restart();
             root.refresh();
-        });
+        })) {
+            root.editorBusy = false;
+            root.editorError = "An earlier save is still finishing — try again in a moment";
+        }
     }
     function removeTotp() {
+        if (root.editorBusy || root.editorScanning || edProc.running) return;
+        const id = root.selectedId, generation = root.editorGeneration;
         root.editorError = ""; root.editorBusy = true;
-        root.edRun(["app-set-totp", root.selectedId], JSON.stringify({ remove: true }), function (d) {
+        if (!root.edRun(["app-set-totp", id], JSON.stringify({ remove: true }), function (d) {
+            if (!root.editorOpen || root.editorMode !== "totp" || root.editorGeneration !== generation
+                || root.selectedId !== id) return;
             root.editorBusy = false;
             if (d.ok === false) { root.editorError = d.error || "Couldn't remove it"; return; }
             root.editorOpen = false; root.totpCode = "";
+            root.invalidateEditorCallbacks();
+            root.clearEditorFields();
+            root.editorMode = "";
             root.flash = "Verification code removed"; flashTimer.restart();
             root.refresh();
-        });
+        })) {
+            root.editorBusy = false;
+            root.editorError = "An earlier editor operation is still finishing — try again in a moment";
+        }
     }
     function scanQr(field) {
+        if (root.editorBusy || root.editorScanning || edProc.running) return;
+        const mode = root.editorMode, generation = root.editorGeneration, target = field;
         root.editorScanning = true; root.editorError = "";
-        root.edRun(["app-scan-qr"], "", function (d) {
+        if (!root.edRun(["app-scan-qr"], "", function (d) {
+            if (!root.editorOpen || root.editorMode !== mode || root.editorGeneration !== generation
+                || field !== target) return;
             root.editorScanning = false;
             if (d.cancelled) return;
             if (d.ok === false) { root.editorError = d.error || "No QR code found"; return; }
             field.text = d.text;
-        });
+        })) {
+            root.editorScanning = false;
+            root.editorError = "An earlier editor operation is still finishing — try again in a moment";
+        }
     }
     function previewTotp(text) {
-        if (!text.trim()) { root.totpPreview = ({}); return; }
+        const mode = root.editorMode, generation = root.editorGeneration;
+        const target = mode === "create" ? crSetup : edSetup;
+        if (!text.trim()) {
+            if (root.editorOpen && root.editorMode === mode && generation === root.editorGeneration
+                && target.text === text) root.totpPreview = ({});
+            return;
+        }
         run(["app-totp-preview"], text, function (d) {
+            if (!root.editorOpen || root.editorMode !== mode || root.editorGeneration !== generation
+                || target.text !== text) return;
             root.totpPreview = d && d.code ? d : ({ error: "" });
         });
     }
@@ -1011,10 +1373,22 @@ ShellRoot {
     // Editor commands get their own process: a save fetches the zone, writes and re-syncs,
     // which takes long enough that it must not hold up the list's own queue.
     function edRun(args, stdinText, done) {
-        edProc.handler = done;
+        if (edProc.running) return false;
+        const callbackGeneration = root.callbackGeneration;
+        const editorGeneration = root.editorGeneration;
+        edProc.handler = function (d) {
+            if (callbackGeneration !== root.callbackGeneration || editorGeneration !== root.editorGeneration)
+                return;
+            if (done) done(d);
+        };
+        edProc.stdinEnabled = true;
         edProc.pending = stdinText && stdinText.length ? stdinText + "\n" : "";
+        edProc.output = "";
         edProc.command = [root.icp].concat(args);
+        edProc.attempt += 1;
+        edProc.attemptActive = true;
         edProc.running = true;
+        return true;
     }
 
     function loadTotp() {
@@ -2277,7 +2651,7 @@ ShellRoot {
                             }
                             AppButton {
                                 text: root.editorScanning ? "Drag over the code…" : "Scan QR code"
-                                enabled: !root.editorScanning && !root.editorBusy
+                                enabled: !root.editorScanning && !root.editorBusy && !edProc.running
                                 onClicked: root.scanQr(edSetup)
                             }
                         }
@@ -2316,7 +2690,8 @@ ShellRoot {
                             }
                         }
                         Text {
-                            visible: root.editorMode === "totp" && root.selected && root.selected.has_totp && !root.editorBusy
+                            visible: root.editorMode === "totp" && root.selected && root.selected.has_totp
+                                     && !root.editorBusy && !edProc.running
                             text: "Remove verification code"
                             color: hRemove.hovered ? Theme.danger : Theme.dim
                             font.family: Theme.uiFont
@@ -2383,7 +2758,18 @@ ShellRoot {
                             }
                             AppButton {
                                 text: "Generate"
-                                onClicked: root.run(["app-generate"], "", function (d) { crPass.text = d.password || ""; })
+                                onClicked: {
+                                    const generation = root.callbackGeneration;
+                                    const editorGeneration = root.editorGeneration;
+                                    crPass.text = "";
+                                    root.run(["app-generate"], "", function (d) {
+                                        if (!root.editorOpen || root.editorMode !== "create"
+                                            || generation !== root.callbackGeneration
+                                            || editorGeneration !== root.editorGeneration
+                                            || crPass.text.length) return;
+                                        crPass.text = d.password || "";
+                                    });
+                                }
                             }
                         }
                         Text {
@@ -2430,7 +2816,7 @@ ShellRoot {
                             }
                             AppButton {
                                 text: root.editorScanning ? "Drag…" : "Scan"
-                                enabled: !root.editorScanning && !root.editorBusy
+                                enabled: !root.editorScanning && !root.editorBusy && !edProc.running
                                 onClicked: root.scanQr(crSetup)
                             }
                         }
