@@ -12,7 +12,6 @@ typo and a damaged file are the same CryptoError, and the caller would helpfully
 from __future__ import annotations
 
 import json
-import os
 
 import nacl.exceptions
 import nacl.pwhash
@@ -52,15 +51,13 @@ def is_initialised() -> bool:
 
 
 def _write_private(path, data: bytes) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
+    paths.atomic_write_private(path, data)
 
 
 def derive(passphrase: str) -> bytes:
     """Passphrase -> 32-byte key using the stored salt. Does not verify it is correct."""
     if not is_initialised():
-        raise NotInitialised("No passphrase has been set; run `icp lock init` first.")
+        raise NotInitialised("No passphrase has been set; run `icp passphrase` first.")
     params = json.loads(params_file().read_text())
     salt = bytes.fromhex(params["salt"])
     return nacl.pwhash.argon2id.kdf(
@@ -86,12 +83,24 @@ def unlock(passphrase: str) -> bytes:
 
 def initialise(passphrase: str) -> bytes:
     """Set (or reset) the passphrase. Returns the new key so the caller can re-encrypt."""
+    key, params, check = prepare_initialisation(passphrase)
+    _write_private(params_file(), params)
+    _write_private(check_file(), check)
+    return key
+
+
+def prepare_initialisation(passphrase: str) -> tuple[bytes, bytes, bytes]:
+    """Build new KDF metadata and its check blob without changing the active lockbox files.
+
+    Passphrase migration stages these bytes beside the existing files and publishes them only in
+    the same journal commit as the encrypted stores.  Keeping this separate from ``initialise``
+    makes a process death before commit recoverable without the old key.
+    """
     salt = nacl.utils.random(nacl.pwhash.argon2id.SALTBYTES)
-    _write_private(params_file(), json.dumps(
+    params = json.dumps(
         {"salt": salt.hex(), "opslimit": _OPS, "memlimit": _MEM, "alg": "argon2id"}
-    ).encode())
+    ).encode()
     key = nacl.pwhash.argon2id.kdf(
         _KEY_SIZE, passphrase.encode("utf-8"), salt, opslimit=_OPS, memlimit=_MEM,
     )
-    _write_private(check_file(), nacl.secret.SecretBox(key).encrypt(_CHECK_PLAINTEXT))
-    return key
+    return key, params, nacl.secret.SecretBox(key).encrypt(_CHECK_PLAINTEXT)

@@ -24,6 +24,7 @@ import re
 import sys
 import time
 
+from .. import paths
 from ..vault import history as hist, nicknames as nick
 from ..vault.store import load_vault
 
@@ -43,8 +44,8 @@ _UUIDISH = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-")
 #
 # The session is bound to the app instance - the PID of the process that runs these commands -
 # so quitting and relaunching asks again. Honest scope: this is against someone at the keyboard
-# or looking at the screen. Code running as this user can already read vault.key, and the
-# session file is no barrier to it.
+# or looking at the screen. Code running as this user can read the encrypted files, and while
+# passphrase mode is unlocked can request the key from the private runtime agent.
 
 
 def _runtime_dir() -> str:
@@ -425,6 +426,7 @@ def cmd_app_signin(args) -> int:
     return code
 
 
+@paths.mutation_lock
 def cmd_app_set_nickname(args) -> int:
     """Rename one entry. Gated like any other edit: the name is the thing a shoulder-surfer
     reads off the list, so changing it is not a cosmetic act."""
@@ -502,6 +504,7 @@ def cmd_app_history(args) -> int:
     return 0
 
 
+@paths.mutation_lock
 def cmd_app_set_password(args) -> int:
     """Change one password. The new value arrives on stdin so it never lands in argv, where
     any process on the machine could read it out of /proc."""
@@ -561,6 +564,7 @@ def cmd_app_details(args) -> int:
     return 0
 
 
+@paths.mutation_lock
 def cmd_app_set_details(args) -> int:
     """Change one entry's extra websites and/or notes: stdin {"sites": [...], "notes": "..."}.
     Fields left out are not touched."""
@@ -613,6 +617,7 @@ def cmd_app_totp_preview(args) -> int:
     return 0
 
 
+@paths.mutation_lock
 def cmd_app_set_totp(args) -> int:
     """Pair (stdin {"setup": key-or-link}) or remove (stdin {"remove": true}) the
     verification code of one entry."""
@@ -674,6 +679,7 @@ def cmd_app_scan_qr(args) -> int:
     return 0
 
 
+@paths.mutation_lock
 def cmd_app_create(args) -> int:
     """Add a new entry. stdin: {"site","username","password","title","notes","sites","setup"}.
     Asks for a fresh fingerprint or password every time - there is no entry yet to hold a grant."""

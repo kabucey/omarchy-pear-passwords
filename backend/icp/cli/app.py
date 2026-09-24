@@ -14,12 +14,13 @@ import uuid
 from datetime import datetime, timezone
 
 from . import ui
-from .. import diag
+from .. import diag, paths
 from ..auth import grandslam as auth, icloud, session
 from ..auth.anisette import Anisette, AnisetteError
 from ..auth.device import Device
 from ..auth.gsa import GSAClient, GSAError
 from ..auth.session import SessionError
+from ..errors import EncryptedStoreError, PassphraseMigrationError
 
 ICLOUD_AUTH_TOKEN = "com.apple.gs.icloud.auth"
 
@@ -215,6 +216,7 @@ def _ensure_fresh_tokens(s: dict, device, anisette, *, interactive: bool) -> Non
     _refresh_webservices(s, device, anisette)   # retry with the fresh mmeAuthToken
 
 
+@paths.mutation_lock
 def cmd_login(args) -> int:
     """Sign in to Apple, cache the persistent tokens, then join the keychain and sync.
 
@@ -444,17 +446,15 @@ def _notify_needs_login() -> None:
         pass
 
 
+@paths.mutation_lock
 def cmd_sync(args) -> int:
     """Fetch the keychain zones and decrypt them into the vault (requires a prior join).
 
-    Guarded by a non-blocking file lock so the periodic background trigger and a manual run
-    can never overlap (a second sync exits immediately rather than racing on the vault)."""
-    import fcntl
+    Guarded by the shared mutation lock so the periodic background trigger and a manual run
+    can never overlap or race on the vault."""
     from ..octagon import client as octagon
     from ..octagon.client import OctagonError
     from ..transport.cloudkit import CloudKitError
-    from ..paths import sync_lock_file
-
     from ..paths import needs_login_file
     interactive = sys.stdin.isatty()
     if needs_login_file().exists() and not interactive:
@@ -462,57 +462,46 @@ def cmd_sync(args) -> int:
                "(run `icp login`, or `icp sync` from a terminal)")
         return 1
 
-    lock = open(sync_lock_file(), "w")
+    s = session.load()
+    if not s:
+        ui.err("not signed in - run: icp login")
+        return 1
+    if not (s.get("octagon") or {}).get("peer_id"):
+        ui.err("not joined to the keychain - run: icp login")
+        return 1
+    device = Device.load_or_create()
+    anisette = Anisette(args.anisette)
+    # The cached cloudKitToken is short-lived; re-mint it from the mmeAuthToken before every
+    # sync. If the mmeAuthToken has also expired, _ensure_fresh_tokens silently re-authenticates
+    # with the saved password (no manual login), unless 2FA is required or no password is saved.
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        ui.err("another sync is already running")
-        return 0
-
+        _ensure_fresh_tokens(s, device, anisette, interactive=interactive)
+        session.save(s)  # persist any freshly re-minted tokens
+    except (icloud.ICloudError, AnisetteError, GSAError) as e:
+        ui.err(f"could not refresh the iCloud token: {e}")
+        if not interactive:
+            # Latch, so the next unattended attempt does not push Apple another code.
+            needs_login_file().touch()
+            _notify_needs_login()
+        return 1
     try:
-        s = session.load()
-        if not s:
-            ui.err("not signed in - run: icp login")
-            return 1
-        if not (s.get("octagon") or {}).get("peer_id"):
-            ui.err("not joined to the keychain - run: icp login")
-            return 1
-        device = Device.load_or_create()
-        anisette = Anisette(args.anisette)
-        # The cached cloudKitToken is short-lived; re-mint it from the mmeAuthToken before every
-        # sync. If the mmeAuthToken has also expired, _ensure_fresh_tokens silently re-authenticates
-        # with the saved password (no manual login), unless 2FA is required or no password is saved.
-        try:
-            _ensure_fresh_tokens(s, device, anisette, interactive=interactive)
-            session.save(s)  # persist any freshly re-minted tokens
-        except (icloud.ICloudError, AnisetteError, GSAError) as e:
-            ui.err(f"could not refresh the iCloud token: {e}")
-            if not interactive:
-                # Latch, so the next unattended attempt does not push Apple another code.
-                needs_login_file().touch()
-                _notify_needs_login()
-            return 1
-        try:
-            client = octagon.OctagonClient(s, device, anisette)
-            session.save(s)  # persist the refreshed cloudKitToken + cloudKitUserId from ckAppInit
-            ui.stage("syncing")
-            n = client.sync_and_decrypt()
-        except (OctagonError, CloudKitError) as e:
-            ui.err(f"sync failed: {e}")
-            return 1
-        needs_login_file().unlink(missing_ok=True)   # trust is good again
-        ui.stage("synced", count=n)
-        ui.out(f"Synced {n} credential(s) into the vault.")
-        # Best-effort, never interactive: refresh the Hide My Email cache only while the web
-        # session's trust is still valid, otherwise keep the cache. Its 2FA is handled at login
-        # (cmd_login), so sync never prompts - see _fetch_aliases_best_effort.
-        n_aliases = len(_fetch_aliases_best_effort(interactive=False))
-        if n_aliases:
-            ui.out(f"Cached {n_aliases} Hide My Email alias(es).")
-        return 0
-    finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        lock.close()
+        client = octagon.OctagonClient(s, device, anisette)
+        session.save(s)  # persist the refreshed cloudKitToken + cloudKitUserId from ckAppInit
+        ui.stage("syncing")
+        n = client.sync_and_decrypt()
+    except (OctagonError, CloudKitError) as e:
+        ui.err(f"sync failed: {e}")
+        return 1
+    needs_login_file().unlink(missing_ok=True)   # trust is good again
+    ui.stage("synced", count=n)
+    ui.out(f"Synced {n} credential(s) into the vault.")
+    # Best-effort, never interactive: refresh the Hide My Email cache only while the web
+    # session's trust is still valid, otherwise keep the cache. Its 2FA is handled at login
+    # (cmd_login), so sync never prompts - see _fetch_aliases_best_effort.
+    n_aliases = len(_fetch_aliases_best_effort(interactive=False))
+    if n_aliases:
+        ui.out(f"Cached {n_aliases} Hide My Email alias(es).")
+    return 0
 
 
 def _ensure_web_session(s: dict, *, interactive: bool):
@@ -563,7 +552,9 @@ def _ensure_web_session(s: dict, *, interactive: bool):
     return sess, account_data
 
 
+@paths.mutation_lock
 def cmd_logout(args) -> int:
+    session.recover_passphrase_migration()
     session.clear()
     ui.out("Session cleared. Device identity kept (use --wipe-device to remove it).")
     if args.wipe_device:
@@ -575,59 +566,101 @@ def cmd_logout(args) -> int:
     return 0
 
 
+@paths.mutation_lock
 def cmd_lock(args) -> int:
-    from ..auth import agent
-    agent.lock()
+    from ..auth import agent, held_key, lockbox
+    session.recover_passphrase_migration()
+    try:
+        agent.lock_strict()
+    except (agent.AgentError, OSError) as e:
+        ui.err(f"could not lock the key agent: {e}")
+        return 1
+    if lockbox.is_initialised():
+        # Remove copies written by older releases. Current passphrase mode never writes one,
+        # and the next operation must ask for the passphrase to refill the runtime agent.
+        held_key.ensure_clean()
     ui.out("Locked.")
     return 0
 
 
+@paths.mutation_lock
 def cmd_unlock(args) -> int:
     from ..auth import agent, lockbox, prompt
+    session.recover_passphrase_migration()
     if not lockbox.is_initialised():
         ui.err("No passphrase set. Run `icp passphrase` first.")
         return 1
     agent.unlock(prompt.ask_passphrase())
+    try:
+        # A prior migration may have committed the new files but failed while deleting a legacy
+        # key.  Treat a normal unlock as the retry point, and do not leave the agent open if the
+        # fail-closed cleanup still cannot complete.
+        session._master_key()
+    except BaseException:
+        try:
+            agent.lock_strict()
+        except BaseException as lock_error:
+            raise PassphraseMigrationError(
+                "unlock cleanup failed and the runtime key could not be invalidated: "
+                f"{lock_error}") from lock_error
+        raise
     ui.out(f"Unlocked ({agent.status()}).")
     return 0
 
 
+@paths.mutation_lock
 def cmd_status(args) -> int:
     from ..auth import agent, lockbox
+    session.recover_passphrase_migration()
     ui.out(f"passphrase: {'set' if lockbox.is_initialised() else 'not set (using keyring)'}")
     ui.out(f"agent: {agent.status()}")
     return 0
 
 
+def _passphrase_migration_files():
+    """Every local artifact that can change during a passphrase conversion."""
+    from ..auth import lockbox
+    return (
+        lockbox.params_file(), lockbox.check_file(),
+        paths.session_file(), paths.vault_file(), paths.aliases_file(),
+        paths.history_file(), paths.nicknames_file(),
+        paths.fallback_key_file(), paths.vault_key_file(),
+        paths.legacy_key_cleanup_file(), paths.master_key_cleanup_file(),
+    )
+
+
+def _stage_migration_blob(transaction: dict, name: str, blob: bytes) -> None:
+    stage = session.migration_stage(transaction, name)
+    paths.atomic_write_private(stage, blob)
+    session.mark_migration_entry(
+        transaction, name, present=True, digest=paths.private_digest(stage))
+
+
+@paths.mutation_lock
 def cmd_passphrase(args) -> int:
     """Set or change the passphrase, re-encrypting everything already stored.
 
     Read the old data with the *current* key before switching, or it becomes unreadable - the
     stores are encrypted under whatever `_master_key()` returned at write time."""
-    from ..auth import agent, lockbox, prompt
+    from ..auth import agent, held_key, lockbox, prompt
     from ..hme import store as hme_store
     from ..vault import store as vault_store
+    from ..vault import history as history_store, nicknames as nickname_store
+
+    session.recover_passphrase_migration()
 
     old_session = session.load()
-    try:
-        old_vault = vault_store.load_vault()
-    except Exception:
-        old_vault = None
-    try:
-        old_aliases = hme_store.load_aliases()
-    except Exception:
-        old_aliases = None
     # History and nicknames sit under the same master key; leaving them out made them
-    # unreadable the moment the key changed.
-    from ..vault import history as history_store, nicknames as nickname_store
-    try:
-        old_history = history_store.load()
-    except Exception:
-        old_history = None
-    try:
-        old_names = nickname_store.load()
-    except Exception:
-        old_names = None
+    # unreadable the moment the key changed. All reads are strict so a corrupt store cannot be
+    # silently replaced by an empty ciphertext during migration.
+    old_vault = vault_store.load_vault()
+    old_aliases = hme_store.load_aliases()
+    old_history = history_store.load()
+    old_names = nickname_store.load()
+
+    targets = session._migration_targets()
+    old_files = {name: targets[name].exists()
+                 for name in ("session", "vault", "aliases", "history", "nicknames")}
 
     new = prompt.ask_passphrase(text="Choose a passphrase for your keychain")
     again = prompt.ask_passphrase(text="Confirm passphrase")
@@ -638,40 +671,95 @@ def cmd_passphrase(args) -> int:
         ui.err("Too short - use a passphrase, not a password.")
         return 1
 
-    key = lockbox.initialise(new)
-    agent.lock()
-    agent.unlock(new)
-    from ..auth import held_key
-    held_key.save(key)
-
-    if old_session is not None:
-        session.save(old_session)
-    if old_vault is not None:
-        vault_store.save_vault(old_vault)
-    if old_aliases is not None:
-        hme_store.save_aliases(old_aliases)
-    if old_history:
-        history_store.save(old_history)
-    if old_names:
-        nickname_store.save(old_names)
-
-    # Drop the pre-passphrase master-key item. The lockbox-derived vault key was
-    # just written by held_key.save above.
+    transaction = None
+    session._set_passphrase_migration_active(True)
     try:
-        import secretstorage
-        conn = secretstorage.dbus_init()
-        coll = secretstorage.get_default_collection(conn)
-        for item in coll.search_items(session._ATTRS):
-            item.delete()
-    except Exception:
-        pass
-    from .. import paths
-    fallback = paths.fallback_key_file()
-    if fallback.exists():
-        fallback.unlink()
+        transaction = session.begin_passphrase_migration({
+            "params": True,
+            "check": True,
+            **old_files,
+        })
+        new_key, params_blob, check_blob = lockbox.prepare_initialisation(new)
+        # Invalidate the old runtime lease before deriving a new one. A failure leaves all
+        # destinations untouched and the preparing journal can be discarded safely.
+        agent.lock_strict()
+        agent.unlock_key(new_key)
+        # Keyring mode has no active KDF files yet, so _master_key() would otherwise select the
+        # old keyring key while writing the staged stores. Keep the derived key transiently in
+        # this process until the journal publishes the new KDF metadata.
+        session._set_passphrase_migration_key(new_key)
 
-    ui.out(f"Passphrase set; existing data re-encrypted. Auto-locks after "
-           f"{agent.DEFAULT_TIMEOUT // 60} min idle (ICP_LOCK_TIMEOUT to change).")
+        if old_files["session"]:
+            session.save(old_session, path=session.migration_stage(transaction, "session"))
+            session.mark_migration_entry(
+                transaction, "session", present=True,
+                digest=paths.private_digest(session.migration_stage(transaction, "session")))
+        if old_files["vault"]:
+            vault_store.save_vault(old_vault, path=session.migration_stage(transaction, "vault"))
+            session.mark_migration_entry(
+                transaction, "vault", present=True,
+                digest=paths.private_digest(session.migration_stage(transaction, "vault")))
+        if old_files["aliases"]:
+            hme_store.save_aliases(old_aliases, path=session.migration_stage(transaction, "aliases"))
+            session.mark_migration_entry(
+                transaction, "aliases", present=True,
+                digest=paths.private_digest(session.migration_stage(transaction, "aliases")))
+        if old_files["history"]:
+            history_store.save(old_history, path=session.migration_stage(transaction, "history"))
+            session.mark_migration_entry(
+                transaction, "history", present=True,
+                digest=paths.private_digest(session.migration_stage(transaction, "history")))
+        if old_files["nicknames"]:
+            nickname_store.save(old_names, path=session.migration_stage(transaction, "nicknames"))
+            session.mark_migration_entry(
+                transaction, "nicknames", present=True,
+                digest=paths.private_digest(session.migration_stage(transaction, "nicknames")))
+
+        _stage_migration_blob(transaction, "params", params_blob)
+        _stage_migration_blob(transaction, "check", check_blob)
+
+        # Once this state is durable, every destination can be completed from staged bytes after
+        # a SIGKILL or power loss. No rollback needs the old key, and legacy cleanup is still
+        # deferred until the committed files have been verified.
+        session.mark_migration_committing(transaction)
+        session.mark_migration_committed(transaction)
+    except BaseException as error:
+        session._set_passphrase_migration_active(False)
+        try:
+            # A failed invalidation must never be hidden. If the transaction is already
+            # committing, leave its journal for deterministic completion on the next command.
+            agent.lock_strict()
+        except BaseException as lock_error:
+            raise PassphraseMigrationError(
+                "passphrase migration failed; the runtime key could not be invalidated and the "
+                f"migration journal was retained: {lock_error}"
+            ) from lock_error
+        if transaction is not None and transaction.get("state") == "preparing":
+            session.abort_passphrase_migration(transaction)
+        elif transaction is not None:
+            raise PassphraseMigrationError(
+                "passphrase migration was interrupted after commit began; rerun the command "
+                "to finish its durable journal recovery"
+            ) from error
+        raise
+    finally:
+        session._set_passphrase_migration_key(None)
+        session._set_passphrase_migration_active(False)
+
+    # These are post-commit, fail-closed cleanup steps. A failure leaves the new encrypted data
+    # usable with the passphrase but deliberately does not claim that every old unlock path is
+    # gone; the next unlock/explicit migration retry performs the cleanup again. The journal stays
+    # in the committed state until both cleanup and its removal succeed.
+    try:
+        held_key.ensure_clean()
+        session.ensure_legacy_master_key_clean()
+        session.finish_passphrase_migration()
+    except BaseException:
+        raise
+
+    ui.out(f"Passphrase set; existing data re-encrypted. The derived key is kept only in the "
+           f"runtime agent and auto-locks after {agent.DEFAULT_TIMEOUT // 60} min idle "
+           f"(ICP_LOCK_TIMEOUT to change); locking or restarting requires the passphrase.")
     return 0
 
 
@@ -762,7 +850,7 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         ui.err("aborted")
         return 130
-    except SessionError as e:
+    except (SessionError, EncryptedStoreError) as e:
         ui.err(str(e))
         return 1
 

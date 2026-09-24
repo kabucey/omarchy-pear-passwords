@@ -1,9 +1,30 @@
 """Offline tests for the decryption pipeline's live building blocks: item AAD
 construction, and CKKS value parsing."""
 
+import plistlib
 import unittest
+from unittest import mock
 
 from icp.keychain import pipeline
+
+
+class _Record:
+    def __init__(self, name, fields):
+        self.record_name = name
+        self.fields = fields
+
+    def get_str(self, name):
+        value = self.fields.get(name)
+        return value if isinstance(value, str) else None
+
+    def get_bytes(self, name):
+        value = self.fields.get(name)
+        return value if isinstance(value, (bytes, bytearray)) else None
+
+
+def _item(name, *, parent="CLASS-1", data=b"cipher", wrapped="d3JhcA=="):
+    return _Record(name, {"parentkeyref": parent, "data": data, "wrappedkey": wrapped,
+                          "encver": 2, "gen": 0})
 
 
 class AadTests(unittest.TestCase):
@@ -54,13 +75,68 @@ class UnionTlkTests(unittest.TestCase):
         pipeline.unwrap_tlkshares = lambda *a, **k: {"TLK-WIFI": b"w" * 64}
         pipeline.unwrap_class_keys = (
             lambda synckeys, tlks, access_key=None: seen.update(tlks=dict(tlks)) or {})
-        pipeline.decrypt_items = lambda items, class_keys: []
+        pipeline.decrypt_items = lambda items, class_keys, *args, **kwargs: []
         try:
             pipeline.build_credential_store({}, "SHA256:me", None, tlks={"TLK-PW": b"p" * 64})
         finally:
             (pipeline.unwrap_tlkshares, pipeline.unwrap_class_keys,
              pipeline.decrypt_items) = orig
         self.assertEqual(seen["tlks"], {"TLK-WIFI": b"w" * 64, "TLK-PW": b"p" * 64})
+
+
+class CompletenessDiagnosticsTests(unittest.TestCase):
+    def test_foreign_tlk_share_is_ignored_without_marking_snapshot_incomplete(self):
+        share = _Record("foreign-share", {"receiver": "SHA256:someone-else",
+                                           "wrappedkey": "not-base64"})
+        diagnostics = pipeline.PipelineDiagnostics(authoritative=True)
+        out = pipeline.unwrap_tlkshares([share], "SHA256:me", None, diagnostics)
+
+        self.assertEqual(out, {})
+        self.assertEqual(diagnostics.foreign_tlkshares, 1)
+        self.assertEqual(diagnostics.tlkshare_failures, [])
+        self.assertTrue(diagnostics.complete)
+
+    def test_partial_item_failure_is_reported_instead_of_dropped(self):
+        good = _item("good", data=b"good")
+        bad = _item("bad", data=b"bad")
+        diagnostics = pipeline.PipelineDiagnostics(authoritative=True)
+        good_plist = {"srvr": "example.com", "acct": "alice", "v_Data": b"secret"}
+
+        with mock.patch.object(pipeline.kc, "siv_unwrap", return_value=b"item-key"), \
+                mock.patch.object(pipeline.kc, "decrypt_item",
+                                  side_effect=[plistlib.dumps(good_plist), ValueError("tampered")]):
+            items = pipeline.decrypt_items([good, bad], {"CLASS-1": b"class-key"}, diagnostics)
+
+        self.assertEqual(items, [good_plist])
+        self.assertEqual(diagnostics.decrypted_items, 1)
+        self.assertEqual(set(diagnostics.item_failures), {"bad"})
+        self.assertFalse(diagnostics.complete)
+
+    def test_missing_class_key_is_reported(self):
+        diagnostics = pipeline.PipelineDiagnostics(authoritative=True)
+        items = pipeline.decrypt_items([_item("needs-key")], {}, diagnostics)
+
+        self.assertEqual(items, [])
+        self.assertEqual(diagnostics.missing_class_keys, {"CLASS-1": ["needs-key"]})
+        self.assertFalse(diagnostics.complete)
+
+    def test_malformed_item_is_reported(self):
+        diagnostics = pipeline.PipelineDiagnostics(authoritative=True)
+        malformed = _item("malformed", data=None, wrapped=None)
+
+        items = pipeline.decrypt_items([malformed], {"CLASS-1": b"class-key"}, diagnostics)
+
+        self.assertEqual(items, [])
+        self.assertIn("malformed", diagnostics.item_failures)
+        self.assertFalse(diagnostics.complete)
+
+    def test_authoritative_empty_result_is_explicitly_valid(self):
+        result = pipeline.build_credential_snapshot(
+            {}, "SHA256:me", None, authoritative=True)
+
+        self.assertEqual(len(result.store), 0)
+        self.assertTrue(result.diagnostics.complete)
+        self.assertTrue(result.diagnostics.authoritative_empty)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import logging
 from ..auth import session
 from ..auth.anisette import Anisette
 from ..auth.device import Device
+from .. import paths
 from ..keychain import update as up
 from ..keychain.pipeline import unwrap_class_keys, unwrap_tlkshares
 from ..octagon import client as octagon
@@ -112,6 +113,7 @@ def _check_synced(domain: str, username: str, predicate) -> None:
     raise PushError("iCloud accepted the change, but it did not come back on sync")
 
 
+@paths.mutation_lock
 def create_entry(site: str, username: str, password: str, *, title: str = "", notes: str = "",
                  sites=(), totp: dict | None = None, anisette=None) -> int:
     """Add one new login: its password record plus the details record Apple's Passwords app
@@ -154,6 +156,7 @@ def create_entry(site: str, username: str, password: str, *, title: str = "", no
     return 2
 
 
+@paths.mutation_lock
 def push_details(domain: str, username: str, *, notes=up._KEEP, sites=up._KEEP,
                  totp=up._KEEP, anisette=None) -> int:
     """Change the notes, extra websites or verification code of one entry.
@@ -191,6 +194,7 @@ def push_details(domain: str, username: str, *, notes=up._KEEP, sites=up._KEEP,
     return 1
 
 
+@paths.mutation_lock
 def push_nickname(domain: str, username: str, name: str, *, anisette=None) -> bool:
     """Rename one entry in iCloud so the new name reaches every device.
 
@@ -225,6 +229,7 @@ def push_nickname(domain: str, username: str, name: str, *, anisette=None) -> bo
     return False
 
 
+@paths.mutation_lock
 def push_password(domain: str, username: str, new_password: str, *, anisette=None,
                   newest_first: bool = True) -> int:
     """Rewrite both records for one account and re-sync. Returns how many records were written.
@@ -287,6 +292,7 @@ def push_password(domain: str, username: str, new_password: str, *, anisette=Non
     return written
 
 
+@paths.mutation_lock
 def create_wifi(ssid: str, password: str, *, anisette=None) -> int:
     """Add one Wi-Fi network password. It lives in the WiFi zone under that zone's own class
     key, so the key is taken from an existing network there - never guessed."""

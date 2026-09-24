@@ -9,6 +9,7 @@ import base64
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 class MasterKeyTests(unittest.TestCase):
@@ -83,7 +84,45 @@ class MasterKeyTests(unittest.TestCase):
         with self.assertRaises(session.SessionError):
             session.load()
 
-    def test_undecryptable_caches_are_discarded(self):
+    def test_corrupt_session_ciphertext_is_preserved(self):
+        from icp.auth import session
+        from icp import paths
+
+        session.save({"a": 1})
+        path = paths.session_file()
+        path.write_bytes(b"corrupt ciphertext")
+        before = path.read_bytes()
+        with self.assertRaises(session.SessionError):
+            session.load()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_atomic_replace_keeps_previous_session(self):
+        from icp.auth import session
+        from icp import paths
+
+        session.save({"a": 1})
+        path = paths.session_file()
+        before = path.read_bytes()
+        with mock.patch.object(paths.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                session.save({"a": 2})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_failed_flush_keeps_previous_session(self):
+        from icp.auth import session
+        from icp import paths
+
+        session.save({"a": 1})
+        path = paths.session_file()
+        before = path.read_bytes()
+        with mock.patch.object(paths.os, "fsync", side_effect=OSError("I/O error")):
+            with self.assertRaises(OSError):
+                session.save({"a": 2})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_undecryptable_caches_are_preserved_and_vault_fails_closed(self):
         from icp.auth import session
         from icp.hme import store as hme
         from icp.hme.client import HmeAlias
@@ -97,9 +136,17 @@ class MasterKeyTests(unittest.TestCase):
         self.assertEqual(len(hme.load_aliases()), 1)
         self.assertEqual(len(vault.load_vault()), 1)
 
+        vault_path = vault.paths.vault_file()
+        aliases_path = hme.paths.aliases_file()
+        old_vault = vault_path.read_bytes()
+        old_aliases = aliases_path.read_bytes()
         self._key_file().write_bytes(base64.b64encode(os.urandom(32)))
-        self.assertEqual(len(vault.load_vault()), 0)  # dropped, rebuilt by the next sync
-        self.assertEqual(hme.load_aliases(), [])
+        with self.assertRaises(vault.VaultError):
+            vault.load_vault()
+        with self.assertRaises(hme.AliasesError):
+            hme.load_aliases()
+        self.assertEqual(vault_path.read_bytes(), old_vault)
+        self.assertEqual(aliases_path.read_bytes(), old_aliases)
 
 
 if __name__ == "__main__":
