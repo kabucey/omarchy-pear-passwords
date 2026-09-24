@@ -21,9 +21,10 @@ def config_dir() -> Path:
 def atomic_write_private(path: Path, data: bytes) -> None:
     """Replace a private file without exposing a partial or world-readable write.
 
-    The temporary file lives beside the destination, so ``os.replace`` is atomic on the
-    destination filesystem.  This is also the primitive used by passphrase migration: a
-    failed rewrite must leave the previous ciphertext intact.
+    The temporary file is created in the destination directory so ``os.replace`` is atomic
+    on the same filesystem.  Flush both the file and its directory before returning; a
+    process or machine failure during a store update must leave the previous ciphertext
+    readable, not a truncated file.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

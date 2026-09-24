@@ -9,6 +9,7 @@ import base64
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 class MasterKeyTests(unittest.TestCase):
@@ -83,7 +84,45 @@ class MasterKeyTests(unittest.TestCase):
         with self.assertRaises(session.SessionError):
             session.load()
 
-    def test_undecryptable_caches_are_preserved_and_fail_closed(self):
+    def test_corrupt_session_ciphertext_is_preserved(self):
+        from icp.auth import session
+        from icp import paths
+
+        session.save({"a": 1})
+        path = paths.session_file()
+        path.write_bytes(b"corrupt ciphertext")
+        before = path.read_bytes()
+        with self.assertRaises(session.SessionError):
+            session.load()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_atomic_replace_keeps_previous_session(self):
+        from icp.auth import session
+        from icp import paths
+
+        session.save({"a": 1})
+        path = paths.session_file()
+        before = path.read_bytes()
+        with mock.patch.object(paths.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                session.save({"a": 2})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_failed_flush_keeps_previous_session(self):
+        from icp.auth import session
+        from icp import paths
+
+        session.save({"a": 1})
+        path = paths.session_file()
+        before = path.read_bytes()
+        with mock.patch.object(paths.os, "fsync", side_effect=OSError("I/O error")):
+            with self.assertRaises(OSError):
+                session.save({"a": 2})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_undecryptable_caches_are_preserved_and_vault_fails_closed(self):
         from icp.auth import session
         from icp.hme import store as hme
         from icp.hme.client import HmeAlias

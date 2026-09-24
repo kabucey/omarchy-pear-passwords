@@ -51,6 +51,116 @@ class SyncSourcesTlksFromRpcTests(unittest.TestCase):
         self.assertEqual([r.type for r in grouped["item"]], ["item"])
         self.assertEqual([r.type for r in grouped["synckey"]], ["synckey"])
 
+    def test_missing_optional_zone_is_tolerated(self):
+        client = octagon.OctagonClient.__new__(octagon.OctagonClient)
+        client.user_id = "CKUSER"
+        outcomes = [
+            octagon.cloudkit.CloudKitError(
+                "zone is absent", code=26, description=".zoneNotFound"),
+            b"passwords",
+        ]
+
+        class _Transport:
+            def fetch_records(self, request):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        client.transport = _Transport()
+        original = octagon.ckks.parse_retrieve_changes_response
+        octagon.ckks.parse_retrieve_changes_response = lambda raw: {
+            "records": [_Record("item")] if raw == b"passwords" else [],
+            "continuation_token": None,
+            "status": 3,
+        }
+        try:
+            grouped = client.sync_keychain(zones=("Engram", "Passwords"))
+        finally:
+            octagon.ckks.parse_retrieve_changes_response = original
+        self.assertEqual([r.type for r in grouped["item"]], ["item"])
+
+    def test_optional_zone_disappearing_after_a_page_aborts_sync(self):
+        client = octagon.OctagonClient.__new__(octagon.OctagonClient)
+        client.user_id = "CKUSER"
+        outcomes = [
+            b"engram-page-1",
+            octagon.cloudkit.CloudKitError(
+                "zone disappeared", code=26, description=".zoneNotFound"),
+        ]
+
+        class _Transport:
+            def fetch_records(self, request):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        client.transport = _Transport()
+        original = octagon.ckks.parse_retrieve_changes_response
+        octagon.ckks.parse_retrieve_changes_response = lambda raw: {
+            "records": [_Record("item")],
+            "continuation_token": b"next",
+            "status": 1,
+        }
+        try:
+            with self.assertRaisesRegex(octagon.OctagonError, "refusing to update the vault"):
+                client.sync_keychain(zones=("Engram",))
+        finally:
+            octagon.ckks.parse_retrieve_changes_response = original
+
+    def test_failed_optional_zone_does_not_allow_partial_snapshot(self):
+        client = octagon.OctagonClient.__new__(octagon.OctagonClient)
+        client.user_id = "CKUSER"
+        outcomes = [
+            octagon.cloudkit.CloudKitError("network failure", description="timeout"),
+            b"passwords",
+        ]
+
+        class _Transport:
+            def fetch_records(self, request):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        client.transport = _Transport()
+        original = octagon.ckks.parse_retrieve_changes_response
+        octagon.ckks.parse_retrieve_changes_response = lambda raw: {
+            "records": [_Record("item")], "continuation_token": None, "status": 3,
+        }
+        try:
+            with self.assertRaisesRegex(octagon.OctagonError, "refusing to update the vault"):
+                client.sync_keychain(zones=("Engram", "Passwords"))
+        finally:
+            octagon.ckks.parse_retrieve_changes_response = original
+
+    def test_failed_credential_zone_after_records_aborts_sync(self):
+        client = octagon.OctagonClient.__new__(octagon.OctagonClient)
+        client.user_id = "CKUSER"
+        outcomes = [
+            b"passwords",
+            octagon.cloudkit.CloudKitError("Manatee fetch failed", description="network failure"),
+        ]
+
+        class _Transport:
+            def fetch_records(self, request):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        client.transport = _Transport()
+        original = octagon.ckks.parse_retrieve_changes_response
+        octagon.ckks.parse_retrieve_changes_response = lambda raw: {
+            "records": [_Record("item")], "continuation_token": None, "status": 3,
+        }
+        try:
+            with self.assertRaisesRegex(octagon.OctagonError, "Manatee"):
+                client.sync_keychain(zones=("Passwords", "Manatee"))
+        finally:
+            octagon.ckks.parse_retrieve_changes_response = original
+
     def test_sync_and_decrypt_threads_recoverable_tlks_and_view_synckeys(self):
         # The Passwords view's TLK is NOT in plain-zone tlkshare records addressed to a fresh peer:
         # `sync` obtains TLKs via fetchRecoverableTLKShares and merges its viewkey synckeys before
@@ -62,7 +172,8 @@ class SyncSourcesTlksFromRpcTests(unittest.TestCase):
         captured = {}
         orig = octagon.decrypt_to_vault
         octagon.decrypt_to_vault = (
-            lambda recs, oct_state, tlks=None: captured.update(recs=recs, tlks=tlks) or 7)
+            lambda recs, oct_state, tlks=None, **kwargs:
+            captured.update(recs=recs, tlks=tlks, kwargs=kwargs) or 7)
         try:
             n = client.sync_and_decrypt()
         finally:
@@ -70,6 +181,7 @@ class SyncSourcesTlksFromRpcTests(unittest.TestCase):
         self.assertEqual(n, 7)
         self.assertEqual(captured["tlks"], {"TLK-PW": b"k" * 64})           # TLKs from the RPC
         self.assertEqual(captured["recs"]["synckey"], ["ZONE-SYNCKEY", "VIEW-SYNCKEY"])  # merged
+        self.assertTrue(captured["kwargs"]["authoritative"])
 
 
 class FetchRecoverableUnionTests(unittest.TestCase):

@@ -23,6 +23,11 @@ KEYCHAIN_ZONES = (
     "LimitedPeersAllowed", "SE-PTC", "Photos",
 )
 
+# These are the zones from which the vault's credentials are built.  A successful sync must
+# fetch every requested credential-bearing zone; accepting one zone while silently losing the
+# other would turn a transient CloudKit error into a destructive local snapshot.
+CREDENTIAL_ZONES = frozenset(("Passwords", "Manatee"))
+
 ID_TYPE_RECORD = 1
 ID_TYPE_RECORD_ZONE = 6
 ID_TYPE_USER = 7
