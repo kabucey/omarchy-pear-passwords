@@ -103,6 +103,21 @@ def _locked_reply() -> int:
     return 1
 
 
+def _authenticate(timeout: int = 120) -> tuple[str, str]:
+    """Return the authentication verdict and the mechanism that produced it.
+
+    A refusal is a real answer and must never be routed around.  Only an unavailable or broken
+    custom gate is eligible for the weaker pkexec fallback.  Keeping that distinction here
+    makes opening the app and every later privileged operation obey the same rule.
+    """
+    from ..ui import reauth
+
+    status = reauth.challenge_status(timeout=timeout)
+    if status == "error":
+        return reauth.pkexec_challenge(), "pkexec"
+    return status, "polkit"
+
+
 def cmd_app_auth(args) -> int:
     """Authenticate to open the app.
 
@@ -124,9 +139,7 @@ def cmd_app_auth(args) -> int:
         json.dump({"ok": True, "authed": True, "via": "session"}, sys.stdout)
         return 0
 
-    status, via = reauth.challenge_status(timeout=60), "polkit"
-    if status == "error":
-        status, via = reauth.pkexec_challenge(), "pkexec"
+    status, via = _authenticate(timeout=60)
     if status != "authed":
         json.dump({"ok": True, "authed": False, "via": via, "reason": status}, sys.stdout)
         return 0
@@ -152,8 +165,8 @@ def _elevate() -> bool:
     ask again, whichever entry it is on."""
     if _full_access():
         return True
-    from ..ui import reauth
-    if not reauth.available() or not reauth.challenge():
+    status, _ = _authenticate()
+    if status != "authed":
         return False
     _write_session()
     return True
@@ -275,12 +288,10 @@ def cmd_app_unlock(args) -> int:
     if _full_access():
         json.dump({"ok": True, **_session_state()}, sys.stdout)
         return 0
-    from ..ui import reauth
-    if not reauth.available():
-        json.dump({"ok": False, "error": "the fingerprint gate is not installed"}, sys.stdout)
-        return 1
-    if not reauth.challenge():
-        json.dump({"ok": False, "error": "authentication cancelled"}, sys.stdout)
+    status, _ = _authenticate()
+    if status != "authed":
+        error = "authentication cancelled" if status == "denied" else "authentication unavailable"
+        json.dump({"ok": False, "error": error}, sys.stdout)
         return 1
     json.dump({"ok": True, **_session_state(_write_session())}, sys.stdout)
     return 0
@@ -680,8 +691,8 @@ def cmd_app_create(args) -> int:
     if not str(d.get("password") or ""):
         json.dump({"ok": False, "error": "a password is needed"}, sys.stdout)
         return 1
-    from ..ui import reauth
-    if not reauth.available() or not reauth.challenge():
+    status, _ = _authenticate()
+    if status != "authed":
         json.dump({"ok": False, "error": "not authorised"}, sys.stdout)
         return 1
     from .push import create_entry
