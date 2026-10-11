@@ -9,6 +9,7 @@ import base64
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 class MasterKeyTests(unittest.TestCase):
@@ -57,6 +58,13 @@ class MasterKeyTests(unittest.TestCase):
         f = self._key_file()
         self.assertEqual(len(base64.b64decode(f.read_bytes())), 32)
         self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+
+    def test_existing_opted_in_file_skips_locked_keyring(self):
+        from icp.auth import session
+        session.save({"token": "t"})
+        with patch.object(session, "_key_from_secret_service",
+                          side_effect=AssertionError("keyring should not be consulted")):
+            self.assertEqual(session.load(), {"token": "t"})
 
     def test_raw_32_byte_key_still_accepted(self):
         """Keys written by versions before the base64 change must keep working."""

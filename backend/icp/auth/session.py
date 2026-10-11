@@ -101,6 +101,12 @@ def _master_key() -> bytes:
             raise SessionError("keychain is locked")
         return key
 
+    # Keep using an existing, explicitly opted-in file key. Trying Secret
+    # Service first can open a desktop unlock prompt and block unattended
+    # clients indefinitely, even though their session uses this file key.
+    if os.environ.get("ICP_ALLOW_KEYFILE") == "1" and paths.fallback_key_file().exists():
+        return _key_from_file()
+
     key = _key_from_secret_service()
     if key is not None:
         return key
