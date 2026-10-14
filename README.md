@@ -1,8 +1,6 @@
 # Pear Passwords
 
 This is the kabucey fork, based on upstream 2.0.3 with retained security protections.
-See [the fork security review](docs/fork-2.0-security-review.md) for the comparison,
-validation results, and this fork’s installer checksum.
 
 Your passwords on iCloud, in a native Omarchy window.
 
@@ -127,11 +125,11 @@ sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut 
 
 The command copies the stage into a fresh directory only root can write, checks that its
 `SHA256SUMS` has the hash above, checks every staged file against `SHA256SUMS`, and runs
-`system/install-root.sh` from that copy. **Check the hash against the
-[fork security review](docs/fork-2.0-security-review.md) for this fork**: it is what proves
-that what root installs is the reviewed code, and the copy in this README is only as trustworthy
-as your checkout. The command never downloads anything; the
-wheels are checked by pip against `backend/requirements.lock`, which `SHA256SUMS` covers.
+`system/install-root.sh` from that copy. The pinned hash identifies this fork's installer
+files and differs from upstream's release hash. Verify it against a trusted copy of this
+fork's `SHA256SUMS`; the copy in this README is only as trustworthy as your checkout.
+The command never downloads anything; the wheels are checked by pip against
+`backend/requirements.lock`, which `SHA256SUMS` covers.
 
 Then search **Pear Passwords** in the launcher.
 

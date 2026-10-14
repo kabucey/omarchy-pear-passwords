@@ -438,15 +438,3 @@ Each of these was considered and rejected because it leaves a hole:
   polkit agent have not run (section 8).
 - Python cannot reliably zero memory; QML strings cannot be zeroed at all. A revealed value is
   overwritten after 20 s or on focus loss, not wiped.
-
-## Fork protections
-
-This fork refuses incomplete CloudKit pagination, failed requested zones (except an absent
-optional zone), and partial item decryption before applying a vault snapshot. A valid optional
-zone absence is accepted only before any page has loaded. Tests: `test_sync_integrity.py`,
-`test_octagon.py`.
-
-Idle locking defaults to five minutes, with an explicit Settings override. This limits the
-Omarchy screen-lock gap described above but does not forward its lock event. Secret edits
-are discarded on grant expiry. Tests: `test_scheduler_no_prompt.py`,
-`test_qml_grant_flow.py`.
