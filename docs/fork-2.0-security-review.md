@@ -90,8 +90,11 @@ Remaining upstream limitations relevant to deployment:
 
 The old work is retained under `archive/pre-2-main-2026-10-14` and
 `archive/pre-2-hardened-2026-10-14`. The second tag contains the stacked hardening changes;
-the standalone escrow fix is already in upstream ancestry. Old fork PRs are closed as
-superseded, rather than being merged into the removed 1.x architecture.
+the standalone escrow fix is already in upstream ancestry. After the merge push, GitHub automatically marked #1, #2 and #5 merged because their original
+commits are ancestors of upstream 2.0.3. PRs #3, #4, #6 and #7 were closed as superseded.
+All nine obsolete `fix/*` and `release/hardened` remote branches were removed, with leases
+checking that their heads had not changed. Only `main` remains as a remote branch; both archive
+tags are on the fork. No parent-repository writes or comments were made.
 
 ## Installer checksum
 
