@@ -1,0 +1,148 @@
+# Pear Passwords: anisette server built from pinned upstream source.
+#
+# Why this file exists: the published docker.io/dadoum/anisette-v3-server image
+# carries no OCI provenance labels and ships the server as a binary copied in
+# from a build that happened elsewhere, so nothing in it ties the running code
+# to a source revision. This Containerfile builds the server here, from one
+# named upstream commit, and labels the result with that commit.
+#
+# Apple's libCoreADI.so / libstoreservicescore.so are NOT in this image. They
+# are fetched on first start by entrypoint.sh, which checks them against the
+# digests in apple-libs.sha256 and refuses to start the server on a mismatch.
+# See docs/anisette-provenance.md.
+
+# debian:stable-20250520-slim, linux/amd64
+ARG DEBIAN_BUILDER=docker.io/library/debian:stable-20250520-slim@sha256:bd002736c5671297bbc7b056bd693c9b214c47191a70505b1ae5ccc722572cc5
+# debian:stable-slim, linux/amd64, resolved 2026-10-07
+ARG DEBIAN_RUNTIME=docker.io/library/debian:stable-slim@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a
+
+# Upstream revision to build. Full 40-character commit SHA only: a tag or a
+# branch name would reintroduce exactly the gap this file closes.
+ARG ANISETTE_REV=684895737aaf1a1c4586fcd5b67509ffd500a36c
+ARG ANISETTE_REPO=https://github.com/Dadoum/anisette-v3-server.git
+
+# The Provision library the server's dub.selections.json pins. It is fetched here instead, at
+# the same commit, so patches/provision-apple-tls.patch can be applied before it is built:
+# upstream turns TLS peer verification off for the provisioning session with Apple. The patch
+# verifies against Apple Root CA only (apple-root-ca.pem), checks the host name and allows the
+# URL bag to point only at https://*.apple.com (omacom/omarchy-plugin-marketplace#10755).
+ARG PROVISION_REV=7717ce1f7b3c9779fe9982005d07b6665071a239
+ARG PROVISION_REPO=https://github.com/Dadoum/Provision.git
+# A short hash of patches/, set by build.sh and recorded as a label and in the image tag, so
+# a changed patch is never mistaken for an image already built.
+ARG PEAR_PATCHES=unset
+
+FROM ${DEBIAN_BUILDER} AS builder
+ARG ANISETTE_REV
+ARG ANISETTE_REPO
+ARG PROVISION_REV
+ARG PROVISION_REPO
+
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y \
+      ca-certificates ldc git clang dub libz-dev libssl-dev libplist-dev libplist-2.0-4 \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/
+
+# Fetch exactly the pinned commit and refuse to build anything else. The
+# length check rejects an abbreviated SHA; the rev-parse check rejects a
+# repository that resolved the argument to something other than that commit.
+RUN test "${#ANISETTE_REV}" -eq 40 \
+ && git init -q . \
+ && git remote add origin "${ANISETTE_REPO}" \
+ && git fetch -q --depth 1 origin "${ANISETTE_REV}" \
+ && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
+ && test "$(git rev-parse HEAD)" = "${ANISETTE_REV}" \
+ && echo "building anisette-v3-server at ${ANISETTE_REV}"
+
+# Provision at the commit the server pins, patched, and swapped in as a path dependency. The
+# grep checks refuse a server revision that pins some other Provision, and a dub.json or
+# selections file the substitution did not change.
+COPY patches/ /patches/
+RUN test "${#PROVISION_REV}" -eq 40 \
+ && grep -qF "\"provision\": {\"version\":\"${PROVISION_REV}\"" dub.selections.json \
+ && git init -q provision \
+ && git -C provision remote add origin "${PROVISION_REPO}" \
+ && git -C provision fetch -q --depth 1 origin "${PROVISION_REV}" \
+ && git -C provision -c advice.detachedHead=false checkout -q FETCH_HEAD \
+ && test "$(git -C provision rev-parse HEAD)" = "${PROVISION_REV}" \
+ && git -C provision apply --check /patches/provision-apple-tls.patch \
+ && git -C provision apply /patches/provision-apple-tls.patch \
+ && ! grep -n 'sslSetVerifyPeer(false)' provision/lib/provision/adi.d \
+ && perl -0pi -e 's/"provision":\s*\{\s*"repository":\s*"git\+https:\/\/github\.com\/Dadoum\/Provision\.git",\s*"version":\s*"$ENV{PROVISION_REV}"\s*\}/"provision": {"path": "provision"}/' dub.json \
+ && perl -0pi -e 's/"provision":\s*\{"version":"$ENV{PROVISION_REV}","repository":"git\+https:\/\/github\.com\/Dadoum\/Provision\.git"\}/"provision": {"path": "provision"}/' dub.selections.json \
+ && grep -qF '"provision": {"path": "provision"}' dub.json \
+ && grep -qF '"provision": {"path": "provision"}' dub.selections.json \
+ && echo "Provision ${PROVISION_REV} patched with provision-apple-tls.patch"
+
+# Dependency versions come from the checked-in dub.selections.json, which pins
+# registry packages to exact versions and the Dadoum git dependencies
+# (plist, plist-d, dynamic-loader) to exact commits; Provision is the patched copy above.
+RUN DC=ldc2 dub build -c "static" --build-mode allAtOnce -b release --compiler=ldc2 \
+ && test -x /opt/anisette-v3-server
+
+FROM ${DEBIAN_RUNTIME}
+ARG ANISETTE_REV
+ARG DEBIAN_RUNTIME
+ARG PROVISION_REV
+ARG PEAR_PATCHES
+
+# ca-certificates is what makes the first-start download from apps.mzstatic.com
+# a TLS-verified fetch rather than an unauthenticated one. curl and unzip are
+# what entrypoint.sh fetches and unpacks the APK with, so that the digests are
+# checked before the server ever sees a library.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y \
+      ca-certificates curl unzip libplist-dev libplist-2.0-4 \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/
+COPY --from=builder /opt/anisette-v3-server /opt/anisette-v3-server
+
+# The digests travel in the image, next to the gate that enforces them, so the
+# running container does not depend on the checkout still being present.
+COPY apple-libs.sha256 /opt/apple-libs.sha256
+COPY entrypoint.sh /opt/entrypoint.sh
+# The only CA the patched provisioning session trusts (see the builder stage).
+COPY apple-root-ca.pem /opt/apple-root-ca.pem
+
+RUN mkdir -p /opt/anisette-v3/provisioning
+
+# Same user and same paths as the upstream image, so an existing icp-anisette
+# volume keeps working and the machine identity in adi.pb is not re-minted.
+RUN useradd -ms /bin/bash Alcoholic \
+ && mkdir /home/Alcoholic/.config/anisette-v3/lib/ -p \
+ && chown -R Alcoholic /home/Alcoholic/ \
+ && chmod -R +wx /home/Alcoholic/ \
+ && chown -R Alcoholic /opt/ \
+ && chmod -R +wx /opt/
+
+# After the blanket chmod above, not before it: the gate and the digests it
+# reads are the two files in this image that the server's own user has no
+# reason to be able to rewrite.
+RUN chown root:root /opt/entrypoint.sh /opt/apple-libs.sha256 /opt/apple-root-ca.pem \
+ && chmod 0555 /opt/entrypoint.sh \
+ && chmod 0444 /opt/apple-libs.sha256 /opt/apple-root-ca.pem
+
+# NOASSERTION is deliberate: as of the pinned revision the upstream repository
+# carries no LICENSE file and GitHub reports no license for it, so there is
+# nothing to cite. Claiming a license here would be an invention.
+LABEL org.opencontainers.image.title="anisette-v3-server (Pear Passwords build)" \
+      org.opencontainers.image.description="Anisette server for Apple sign-in, built from pinned upstream source for the Pear Passwords Omarchy plugin. Apple's libCoreADI.so and libstoreservicescore.so are downloaded at first start, not baked in, and are checked against apple-libs.sha256 before the server starts." \
+      org.opencontainers.image.source="https://github.com/Dadoum/anisette-v3-server" \
+      org.opencontainers.image.revision="${ANISETTE_REV}" \
+      io.github.dragosol.pear-passwords.provision.revision="${PROVISION_REV}" \
+      io.github.dragosol.pear-passwords.patches="${PEAR_PATCHES}" \
+      org.opencontainers.image.licenses="NOASSERTION" \
+      org.opencontainers.image.base.name="${DEBIAN_RUNTIME}" \
+      org.opencontainers.image.documentation="https://github.com/dragosol/omarchy-pear-passwords/blob/main/docs/anisette-provenance.md"
+
+USER Alcoholic
+EXPOSE 6969
+# The gate, not the server: it fetches and verifies the libraries, then execs
+# the server. Going straight to the server would restore upstream's unchecked
+# download, which is the finding this closes.
+ENTRYPOINT [ "/opt/entrypoint.sh" ]

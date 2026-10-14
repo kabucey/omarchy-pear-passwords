@@ -1,20 +1,28 @@
-"""A line-of-JSON frontend, so a GUI can drive the sign-in flow.
+"""A line-of-JSON frontend on stdio, for driving the Apple sign-in flow while developing.
+
+In 2.0 the Pear window reaches the same flow through the daemon's socket frontend
+(daemon/frontend.py, which sends docs/protocol.md section 9.2's stream). This one speaks the 1.x
+shape on stdin/stdout so the flow can be exercised against a scratch store without the daemon.
+Both implement daemon.context.Frontend, so the flow never knows which one it is talking to.
 
 Protocol, one JSON object per line.
 
   out   {"event":"step"|"out"|"warn"|"err","text":...}
-  ask   {"need":"text"|"secret"|"confirm","prompt":...}   -> reply {"value": "..."}
-  end   {"event":"done","ok":true|false,"code":N}
+  stage {"event":"stage","stage":...,...info}
+  ask   {"need":"text"|"secret"|"confirm"|"choice","prompt":...}   -> reply {"value": "..."}
+        reply {"cancel": true}, a malformed line, or EOF cancels the whole flow
 
 The GUI renders whatever prompt arrives rather than knowing the flow, so a step added to
-sign-in later reaches it with no UI change. Secrets travel in-process down a pipe to a child
-this process spawned - they are never arguments, never environment, never a file.
+sign-in later reaches it with no UI change. Secrets travel down a pipe - they are never
+arguments, never environment, never a file.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+
+from ..daemon.context import Cancelled
 
 
 class JsonFrontend:
@@ -32,16 +40,16 @@ class JsonFrontend:
         if not line:
             # The GUI closed the pipe: treat it as cancelling, not as an empty answer, or a
             # blank would be submitted as the verification code and burn an attempt.
-            raise KeyboardInterrupt("sign-in cancelled")
+            raise Cancelled("sign-in cancelled")
         try:
             reply = json.loads(line)
         except ValueError:
-            raise KeyboardInterrupt("malformed reply")
-        if reply.get("cancel"):
-            raise KeyboardInterrupt("sign-in cancelled")
+            raise Cancelled("malformed reply")
+        if not isinstance(reply, dict) or reply.get("cancel"):
+            raise Cancelled("sign-in cancelled")
         return str(reply.get("value", ""))
 
-    # --- what ui.py calls -------------------------------------------------
+    # --- daemon.context.Frontend --------------------------------------------
     def emit(self, kind: str, text: str) -> None:
         self._send({"event": kind, "text": str(text)})
 
@@ -56,8 +64,8 @@ class JsonFrontend:
         reply = self._await({"need": "confirm", "kind": kind, "prompt": prompt, "detail": detail})
         return reply.strip().lower() in ("y", "yes", "true")
 
-    def stage(self, name: str, **info) -> None:
-        self._send({"event": "stage", "stage": name, **info})
+    def stage(self, stage_name: str, **info) -> None:
+        self._send({"event": "stage", "stage": stage_name, **info})
 
     def choose(self, prompt: str, options: list, kind=None, details=None):
         reply = self._await({"need": "choice", "kind": kind, "prompt": prompt,

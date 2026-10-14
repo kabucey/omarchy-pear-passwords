@@ -23,6 +23,8 @@ KEYCHAIN_ZONES = (
     "LimitedPeersAllowed", "SE-PTC", "Photos",
 )
 
+CREDENTIAL_ZONES = frozenset(("Passwords", "Manatee"))
+
 ID_TYPE_RECORD = 1
 ID_TYPE_RECORD_ZONE = 6
 ID_TYPE_USER = 7

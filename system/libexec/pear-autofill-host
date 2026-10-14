@@ -1,0 +1,10 @@
+#!/bin/sh
+# Pear Passwords browser autofill host: the file a native-messaging manifest points at.
+#
+# Installed root-owned as /usr/local/lib/pear-passwords/libexec/pear-autofill-host. A browser
+# runs it when an extension the user registered (pear-passwords-autofill register) connects to
+# io.github.dragosol.pearpasswords. The browser appends its own arguments (Firefox: the
+# manifest path and the extension id; Chromium: the caller's origin). pear-exec takes exactly
+# one argument, and nothing on this command line is trusted anyway, so they are dropped here.
+# stdin and stdout carry the native-messaging stream and pass straight through.
+exec /usr/local/lib/pear-passwords/libexec/pear-exec autofill

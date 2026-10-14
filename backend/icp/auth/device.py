@@ -1,14 +1,16 @@
 """Persistent local device identity - generated once, reused forever, so a stable
 X-Mme-Device-Id lets Apple remember the 2FA approval and stop re-prompting. Anisette supplies
-the volatile X-Apple-I-MD* machine data and may override these values."""
+the volatile X-Apple-I-MD* machine data and may override these values.
+
+The identity is not a key: in 2.0 it lives in the store's plaintext device.json (0600, under the
+daemon's own uid), read and written through the store so nothing here touches a path."""
 
 import base64
-import json
 import locale
 import uuid
 from datetime import datetime, timezone
 
-from .. import paths
+_FIELDS = ("device_id", "serial", "local_user_uuid")
 
 
 class Device:
@@ -18,33 +20,34 @@ class Device:
         self.local_user_uuid = local_user_uuid
 
     @classmethod
-    def load_or_create(cls) -> "Device":
-        f = paths.device_file()
-        if f.exists():
-            data = json.loads(f.read_text())
-            return cls(data["device_id"], data["serial"], data["local_user_uuid"])
-        dev = cls(
+    def new(cls) -> "Device":
+        return cls(
             device_id=str(uuid.uuid4()).upper(),
             # Mac-like 12-char serial; replaced by anisette's if it provides one.
             serial="C02" + uuid.uuid4().hex[:9].upper(),
             local_user_uuid=str(uuid.uuid4()).upper(),
         )
-        dev.save()
-        return dev
 
-    def save(self) -> None:
-        f = paths.device_file()
-        f.write_text(
-            json.dumps(
-                {
-                    "device_id": self.device_id,
-                    "serial": self.serial,
-                    "local_user_uuid": self.local_user_uuid,
-                },
-                indent=2,
-            )
-        )
-        f.chmod(0o600)
+    @classmethod
+    def from_dict(cls, data: dict) -> "Device | None":
+        """None for anything incomplete, so a damaged record is replaced rather than half-used."""
+        if not isinstance(data, dict) or not all(isinstance(data.get(k), str) and data.get(k)
+                                                 for k in _FIELDS):
+            return None
+        return cls(data["device_id"], data["serial"], data["local_user_uuid"])
+
+    def to_dict(self) -> dict:
+        return {"device_id": self.device_id, "serial": self.serial,
+                "local_user_uuid": self.local_user_uuid}
+
+    @classmethod
+    def load_or_create(cls, store) -> "Device":
+        """The store's device identity, created and saved on first use."""
+        dev = cls.from_dict(store.load_device() or {})
+        if dev is None:
+            dev = cls.new()
+            store.save_device(dev.to_dict())
+        return dev
 
     def meta_headers(self) -> dict:
         """Fallback identity headers; anisette values override the X-Apple-I-MD* ones."""

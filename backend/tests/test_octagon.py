@@ -60,16 +60,52 @@ class SyncSourcesTlksFromRpcTests(unittest.TestCase):
         client.fetch_recoverable_tlks = lambda: ({"TLK-PW": b"k" * 64}, ["VIEW-SYNCKEY"])
         client.sync_keychain = lambda: {"synckey": ["ZONE-SYNCKEY"], "item": []}
         captured = {}
-        orig = octagon.decrypt_to_vault
-        octagon.decrypt_to_vault = (
-            lambda recs, oct_state, tlks=None: captured.update(recs=recs, tlks=tlks) or 7)
+        orig = octagon.decrypt_to_sync_items
+        octagon.decrypt_to_sync_items = (
+            lambda recs, oct_state, tlks=None, nicknames=None:
+            captured.update(recs=recs, tlks=tlks, nicknames=nicknames) or ["item"])
         try:
-            n = client.sync_and_decrypt()
+            items = client.sync_and_decrypt(nicknames={"k1-x": "Mine"})
         finally:
-            octagon.decrypt_to_vault = orig
-        self.assertEqual(n, 7)
+            octagon.decrypt_to_sync_items = orig
+        self.assertEqual(items, ["item"])
         self.assertEqual(captured["tlks"], {"TLK-PW": b"k" * 64})           # TLKs from the RPC
         self.assertEqual(captured["recs"]["synckey"], ["ZONE-SYNCKEY", "VIEW-SYNCKEY"])  # merged
+        self.assertEqual(captured["nicknames"], {"k1-x": "Mine"})
+
+    def test_the_item_shape_travels_with_the_sync_items(self):
+        # op diag-items reads what the last sync decrypted, as names and counts only.
+        from icp.vault.host import CredentialStore
+        decrypted = [{"class": "inet", "agrp": "com.apple.cfnetwork", "srvr": "a.example",
+                      "acct": "me", "v_Data": b"pw"}]
+        orig = octagon.decrypt_credentials
+        octagon.decrypt_credentials = lambda recs, st, tlks=None: CredentialStore.from_items(
+            decrypted)
+        try:
+            client = octagon.OctagonClient.__new__(octagon.OctagonClient)
+            client.record = {"octagon": {"peer_id": "SHA256:me"}}
+            client.fetch_recoverable_tlks = lambda: ({}, [])
+            client.sync_keychain = lambda: {"item": []}
+            items = client.sync_and_decrypt()
+        finally:
+            octagon.decrypt_credentials = orig
+        self.assertEqual(len(items), 1)
+        shape = client.item_shape
+        self.assertIs(shape, items.item_shape)
+        self.assertEqual(shape[("inet", "com.apple.cfnetwork")]["count"], 1)
+        self.assertNotIn("a.example", repr(shape))
+
+    def test_a_zone_that_fails_to_load_aborts_the_snapshot(self):
+        client = octagon.OctagonClient.__new__(octagon.OctagonClient)  # bypass __init__/network
+        client.user_id = "CKUSER"
+
+        class _Transport:
+            def fetch_records(self, request):
+                raise octagon.cloudkit.CloudKitError("zone gone")
+
+        client.transport = _Transport()
+        with self.assertRaises(octagon.OctagonError):
+            client.sync_keychain(zones=("Passwords", "WiFi"))
 
 
 class FetchRecoverableUnionTests(unittest.TestCase):

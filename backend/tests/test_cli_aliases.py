@@ -1,15 +1,18 @@
-"""The web-session orchestration behind `icp show`'s Hide My Email lookup
-(icp.cli.app._ensure_web_session, _fetch_aliases_best_effort)."""
+"""The web-session orchestration behind the Hide My Email lookup
+(icp.auth.signin.ensure_web_session) and the daemon's best-effort alias refresh
+(icp.daemon.apple.fetch_aliases)."""
 
 from types import SimpleNamespace
 
 import pytest
 
-from icp.auth import webauth
+from icp.auth import signin, webauth
 from icp.auth.webauth import WebAuthError
-from icp.cli import app
+from icp.daemon import apple
+from icp.daemon.context import BackgroundFrontend, UserContext
 from icp.hme.client import HmeAlias
-from icp.vault.host import Credential, CredentialStore
+
+from apple_fakes import FakeStore, ScriptedFrontend
 
 
 class _FakeSession:
@@ -23,6 +26,7 @@ class _FakeSession:
         self.session_data = dict(session_data or {})
         self.http = object()
         self.needs_2fa = False
+        self.cookies_need_reauth = False
         self.needs_2fa_after_signin = False
         self.signin_calls = []
         self.push_calls = 0
@@ -54,7 +58,7 @@ def test_reuses_valid_session_without_signin(monkeypatch):
     monkeypatch.setattr(webauth, "hsa_challenge_required", lambda data: False)
 
     s = {"webauth": {"session_data": {"session_token": "tok"}}}
-    sess, data = app._ensure_web_session(s, interactive=False)
+    sess, data = signin.ensure_web_session(s, BackgroundFrontend(), interactive=False)
 
     assert data == {"stage": "ok"}
     assert fake.signin_calls == []
@@ -72,10 +76,28 @@ def test_stale_saved_session_falls_through_to_signin(monkeypatch):
 
     s = {"username": "alice", "password": "secret",
         "webauth": {"session_data": {"session_token": "stale"}}}
-    sess, data = app._ensure_web_session(s, interactive=False)
+    sess, data = signin.ensure_web_session(s, BackgroundFrontend(), interactive=False)
 
     assert fake.signin_calls == [("alice", "secret", None)]
     assert data == {"stage": "fresh"}
+
+
+def test_legacy_unscoped_cookies_force_full_signin(monkeypatch):
+    fake = _FakeSession("auth-1", session_data={"session_token": "stale",
+                                                 "trust_token": "old-trust"})
+    fake.cookies_need_reauth = True
+    fake.account_login_results = [{"stage": "fresh"}]
+    monkeypatch.setattr(webauth, "WebAuthSession", lambda *a, **k: fake)
+    monkeypatch.setattr(webauth, "hsa_challenge_required", lambda data: False)
+
+    s = {"username": "alice", "password": "secret", "webauth": {
+        "session_data": {"session_token": "stale", "trust_token": "old-trust"},
+        "cookies": {"aasp": "legacy-cookie"},
+    }}
+    sess, data = signin.ensure_web_session(s, BackgroundFrontend(), interactive=False)
+
+    assert data == {"stage": "fresh"}
+    assert fake.signin_calls == [("alice", "secret", None)]
 
 
 def test_expired_session_signs_in_with_saved_password(monkeypatch):
@@ -85,7 +107,7 @@ def test_expired_session_signs_in_with_saved_password(monkeypatch):
     monkeypatch.setattr(webauth, "hsa_challenge_required", lambda data: False)
 
     s = {"username": "alice", "password": "secret", "webauth": {}}
-    sess, data = app._ensure_web_session(s, interactive=False)
+    sess, data = signin.ensure_web_session(s, BackgroundFrontend(), interactive=False)
 
     assert data == {"stage": "fresh"}
     assert fake.signin_calls == [("alice", "secret", None)]
@@ -98,10 +120,10 @@ def test_2fa_challenge_requests_push_then_prompts_then_succeeds(monkeypatch):
     fake.account_login_results = [{"stage": "trusted"}]
     monkeypatch.setattr(webauth, "WebAuthSession", lambda *a, **k: fake)
     monkeypatch.setattr(webauth, "hsa_challenge_required", lambda data: False)
-    monkeypatch.setattr(app, "_twofa_prompt", lambda kind: "123456")
+    fe = ScriptedFrontend({"code": "123456"})
 
     s = {"username": "alice", "password": "secret", "webauth": {}}
-    sess, data = app._ensure_web_session(s, interactive=True)
+    sess, data = signin.ensure_web_session(s, fe, interactive=True)
 
     assert fake.push_calls == 1
     assert fake.twofa_calls == ["123456"]
@@ -115,7 +137,7 @@ def test_noninteractive_2fa_raises_instead_of_blocking(monkeypatch):
 
     s = {"username": "alice", "password": "secret", "webauth": {}}
     with pytest.raises(WebAuthError, match="2FA"):
-        app._ensure_web_session(s, interactive=False)
+        signin.ensure_web_session(s, ScriptedFrontend(), interactive=False)
     assert fake.push_calls == 0
     assert fake.twofa_calls == []
 
@@ -126,65 +148,61 @@ def test_no_saved_password_raises_clearly(monkeypatch):
 
     s = {"webauth": {}}
     with pytest.raises(WebAuthError, match="no saved Apple ID password"):
-        app._ensure_web_session(s, interactive=False)
+        signin.ensure_web_session(s, BackgroundFrontend(), interactive=False)
     assert fake.signin_calls == []
 
 
-class _FakeSessionModule:
-    """Stands in for icp.auth.session inside app.py (both `.load()` and `.save()`)."""
-
-    def __init__(self, record):
-        self.record = record
-        self.saved = []
-
-    def load(self):
-        return self.record
-
-    def save(self, s):
-        self.saved.append(s)
+def _ctx(store, frontend=None):
+    return UserContext(uid=1000, store=store, anisette_url="http://127.0.0.1:1",
+                       frontend=frontend)
 
 
-def test_fetch_aliases_skips_silently_without_saved_password(monkeypatch, capsys):
-    monkeypatch.setattr(app, "session", _FakeSessionModule({"username": "alice"}))
-    monkeypatch.setattr(app, "_ensure_web_session",
+def test_fetch_aliases_skips_silently_without_saved_password(monkeypatch):
+    monkeypatch.setattr(signin, "ensure_web_session",
                         lambda *a, **k: pytest.fail("must not touch the network without a password"))
+    fe = ScriptedFrontend()
+    store = FakeStore(session={"username": "alice"}, aliases=[{"address": "kept"}])
 
-    result = app._fetch_aliases_best_effort(interactive=False)
+    assert apple.fetch_aliases(_ctx(store, fe)) == 1
+    assert store.aliases == [{"address": "kept"}]
+    assert fe.events == []
 
-    assert result == []
-    assert capsys.readouterr().err == ""
 
-
-def test_fetch_aliases_warns_but_does_not_raise_on_failure(monkeypatch, capsys):
-    """On failure, falls back to the cache (hme/store.py) rather than an empty list. The cache is
-    mocked so the test doesn't depend on this machine's real aliases.enc."""
-    from icp.hme import store as hme_store
-
-    monkeypatch.setattr(app, "session", _FakeSessionModule({"password": "secret"}))
-    monkeypatch.setattr(hme_store, "load_aliases", lambda: ["cached-fallback"])
-
+def test_fetch_aliases_warns_but_does_not_raise_on_failure(monkeypatch):
+    """On failure the aliases already in the store stay, and the count is theirs."""
     def boom(*a, **k):
         raise WebAuthError("2FA did not clear the web-session challenge")
 
-    monkeypatch.setattr(app, "_ensure_web_session", boom)
+    monkeypatch.setattr(signin, "ensure_web_session", boom)
+    fe = ScriptedFrontend()
+    store = FakeStore(session={"password": "secret"}, aliases=[{"address": "cached-fallback"}])
 
-    result = app._fetch_aliases_best_effort(interactive=False)
+    assert apple.fetch_aliases(_ctx(store, fe)) == 1
+    assert store.aliases == [{"address": "cached-fallback"}]
+    assert any(e[:2] == ("emit", "warn") and "Hide My Email unavailable" in e[2]
+               for e in fe.events)
 
-    assert result == ["cached-fallback"]
-    assert "Hide My Email unavailable" in capsys.readouterr().err
+
+def test_fetch_aliases_in_the_background_never_asks_for_2fa(monkeypatch):
+    seen = {}
+
+    def ensure(s, ui, *, interactive):
+        seen["interactive"] = interactive
+        raise WebAuthError("Apple asked for a 2FA code for the web session")
+
+    monkeypatch.setattr(signin, "ensure_web_session", ensure)
+    store = FakeStore(session={"password": "secret"})
+    assert apple.fetch_aliases(_ctx(store)) == 0
+    assert seen == {"interactive": False}
 
 
-def test_fetch_aliases_returns_parsed_list_on_success(monkeypatch):
-    """`save_aliases` is mocked so the test doesn't overwrite this machine's real aliases.enc."""
-    from icp.hme import client as hme_client, store as hme_store
+def test_fetch_aliases_stores_the_parsed_list_on_success(monkeypatch):
+    from icp.hme import client as hme_client
 
-    saved = []
-    monkeypatch.setattr(hme_store, "save_aliases", lambda aliases: saved.append(aliases))
-    monkeypatch.setattr(app, "session", _FakeSessionModule({"password": "secret"}))
     account_data = {"webservices": {
         "premiummailsettings": {"url": "https://p1-maildomainws.icloud.com", "status": "active"}}}
     fake_sess = SimpleNamespace(http=object())
-    monkeypatch.setattr(app, "_ensure_web_session", lambda *a, **k: (fake_sess, account_data))
+    monkeypatch.setattr(signin, "ensure_web_session", lambda *a, **k: (fake_sess, account_data))
 
     alias = HmeAlias(anonymous_id="a1", address="quiet-otter@icloud.com", label="Claude",
                      note="", forward_to="me@example.com", is_active=True,
@@ -198,8 +216,10 @@ def test_fetch_aliases_returns_parsed_list_on_success(monkeypatch):
             return [alias]
 
     monkeypatch.setattr(hme_client, "HmeClient", _FakeHmeClient)
+    store = FakeStore(session={"password": "secret"})
 
-    result = app._fetch_aliases_best_effort(interactive=False)
-
-    assert result == [alias]
-    assert saved == [[alias]]
+    assert apple.fetch_aliases(_ctx(store)) == 1
+    assert store.aliases == [{"anonymous_id": "a1", "address": "quiet-otter@icloud.com",
+                              "label": "Claude", "note": "", "forward_to": "me@example.com",
+                              "is_active": True, "domain": "claude.ai", "created_at": 0.0}]
+    assert store.session_saves == 1          # the refreshed web-session cookies are kept

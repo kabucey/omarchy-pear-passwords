@@ -29,6 +29,11 @@ class ItemUpdateError(Exception):
     pass
 
 
+class NotesNotUtf8(ItemUpdateError):
+    """The stored notes are not valid UTF-8, so a tag edit cannot splice them without writing
+    U+FFFD over the user's bytes. Refused, never repaired."""
+
+
 def decrypt_item_record(record, class_key: bytes) -> dict:
     """The record's plist, or raise. Mirrors pipeline.decrypt_items for a single record."""
     data = record.get_bytes("data")
@@ -167,21 +172,56 @@ def diff_plists(before: dict, after: dict) -> dict:
 _KEEP = object()
 
 
+def stored_notes(inner: dict, *, strict: bool) -> str:
+    """The notes text of a metadata blob's inner dict ("" when it has none). `strict` raises
+    NotesNotUtf8 for bytes that are not UTF-8; otherwise they decode with U+FFFD, as the read
+    path (metadata.notes) does."""
+    v = inner.get("notes")
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            return bytes(v).decode("utf-8")
+        except UnicodeDecodeError:
+            if strict:
+                raise NotesNotUtf8("the notes are not UTF-8") from None
+            return bytes(v).decode("utf-8", "replace")
+    return v if isinstance(v, str) else ""
+
+
 def edit_details(meta_plist: dict, *, notes=_KEEP, sites=_KEEP, totp=_KEEP,
-                 now: float | None = None) -> dict:
+                 notes_body=_KEEP, tags=_KEEP, now: float | None = None) -> dict:
     """Return the metadata plist with notes / extra websites / verification code changed.
 
     Each argument left at its default is not touched. Every other key in the blob - password
     history, title, context - is carried across as-is, so an edit to one field cannot drop
     another. Types follow what Apple itself writes: notes as UTF-8 bytes, `s_as` as a list of
     {"s": site}, the TOTP secret as the decoded key bytes.
+
+    `notes` replaces the whole notes (trimmed of outer newlines). `notes_body` and `tags`
+    splice into the notes as they are stored in this blob instead (keychain/tagline.py): the
+    body is replaced and the final "Tags:" line kept, or that one line is replaced and every
+    byte before it kept. A body is still trimmed of outer newlines, as an explicit edit; the
+    rest is not normalised. Tags on notes that are not UTF-8 raise NotesNotUtf8.
     """
     import time
+    from . import tagline
     blob = meta_plist.get("v_Data")
     if not isinstance(blob, (bytes, bytearray)):
         raise ItemUpdateError("metadata record has no v_Data blob")
+    if notes is not _KEEP and (notes_body is not _KEEP or tags is not _KEEP):
+        raise ItemUpdateError("notes replaces what notes_body and tags splice")
     inner = plistlib.loads(bytes(blob))
     stamp = _apple_date(now if now is not None else time.time())
+    if notes_body is not _KEEP or tags is not _KEEP:
+        text = stored_notes(inner, strict=tags is not _KEEP)
+        # Tags first: a "Tags:" line typed at the end of the body then joins them, as on create.
+        if tags is not _KEEP:
+            text = tagline.replace_tags(text, list(tags or ()))
+        if notes_body is not _KEEP:
+            text = tagline.replace_body(text, (notes_body or "").strip("\n"))
+        if text:
+            inner["notes"] = text.encode("utf-8")
+        else:
+            inner.pop("notes", None)
     if notes is not _KEEP:
         text = (notes or "").strip("\n")
         if text:

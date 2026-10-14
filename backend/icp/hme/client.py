@@ -7,6 +7,7 @@ import dataclasses
 
 import requests
 
+from ..auth.endpoints import is_apple_service_url
 from ..errors import AppleError
 
 
@@ -46,11 +47,19 @@ class HmeAlias:
 
 class HmeClient:
     def __init__(self, base_url: str, http: requests.Session):
+        if not is_apple_service_url(base_url):
+            raise HmeError("refusing an invalid Apple HME service URL")
         self._v2 = base_url.rstrip("/") + "/v2"
         self.http = http
 
     def list(self) -> list[HmeAlias]:
-        resp = self.http.get(f"{self._v2}/hme/list", headers=_HEADERS, timeout=20)
+        resp = self.http.get(f"{self._v2}/hme/list", headers=_HEADERS, timeout=20,
+                             allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            location = getattr(resp, "headers", {}).get("Location", "")
+            raise HmeError(
+                "refusing an unexpected redirect from hme/list"
+                + (f" to {location!r}" if location else ""))
         try:
             data = resp.json()
         except ValueError as e:

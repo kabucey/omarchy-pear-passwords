@@ -1,0 +1,25 @@
+# Apple libraries the anisette container loads. ENFORCED, not recorded:
+# anisette/entrypoint.sh checks the fetched bytes against this file and refuses
+# to start the server on a mismatch, so editing this file changes what runs.
+#
+# Recorded 2026-10-07 from
+#   https://apps.mzstatic.com/content/android-apple-music-apk/applemusic.apk
+#   Content-Length: 142139820
+#   Last-Modified:  Tue, 15 Apr 2025 18:26:03 GMT
+#   sha256:         9aab4e3bfd44b509dd657b030d46df536c5592512c256fc59012cce47a2e9c9c
+#
+# The APK itself is not digest-pinned - Apple can replace it at that URL at any
+# time, and there is no immutable, versioned URL to pin instead. What is pinned
+# is what comes out of it: these two libraries. So a new Apple Music release
+# makes the container refuse to start rather than quietly load different code,
+# and a person re-records these digests after looking.
+# See docs/anisette-provenance.md.
+
+# lib/x86_64/libCoreADI.so (1596128 bytes)
+ece4ffa6bbe4239e8f0d4714da57e62ce5e3c581d19553a83d78ac897783b905  libCoreADI.so
+# lib/x86_64/libstoreservicescore.so (2391768 bytes)
+d8be230df34c0044758d43e33a8dabd3236b9a4258c4d48cb366911224d52f68  libstoreservicescore.so
+
+# For reference, the aarch64 members of the same APK:
+#   lib/arm64-v8a/libCoreADI.so           (1792592 bytes)  9d5b557cf3faf88c34c394ab2cd7fc1a3b4acf3aed51f28cd0bc093858107c22
+#   lib/arm64-v8a/libstoreservicescore.so (2388480 bytes)  bd335e6963ba5ae2f5babca613435ad56d2660a9aee37df35f876c458d105ce4

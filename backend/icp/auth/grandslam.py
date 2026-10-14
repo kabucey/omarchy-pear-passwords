@@ -36,7 +36,7 @@ def _pick_phone_id(gsa: GSAClient, dsid: str, idms: str) -> int:
 
 
 def authenticate(gsa: GSAClient, username: str, password: str,
-                 twofa: TwoFactorCallback) -> dict:
+                 twofa: TwoFactorCallback | None) -> dict:
     """Return the decrypted server provisioning data (spd), handling 2FA transparently."""
     r, spd = gsa.authenticate(username, password)
     status = r.get("Status", {})
@@ -49,6 +49,10 @@ def authenticate(gsa: GSAClient, username: str, password: str,
                  bool(spd.get("GsIdmsToken") or spd.get("GsIdMS")))
 
     if au in ("trustedDeviceSecondaryAuth", "secondaryAuth"):
+        if twofa is None:
+            # Nobody is there to type a code (a background sync): stand down BEFORE asking
+            # Apple to push one, or the person's devices show a prompt nothing can answer.
+            raise GSAError("2FA required and nobody is present to answer it")
         dsid = spd.get("adsid") or spd.get("DsPrsId")
         idms = spd.get("GsIdmsToken") or spd.get("GsIdMS")
         if not dsid or not idms:

@@ -1,0 +1,128 @@
+diff --git a/lib/provision/adi.d b/lib/provision/adi.d
+index b6f8d64..45158f9 100644
+--- a/lib/provision/adi.d
++++ b/lib/provision/adi.d
+@@ -372,7 +372,13 @@ public class Device {
+ }
+ 
+ public class ProvisioningSession {
+-    private Request request;
++    // Pear Passwords: TLS to Apple is verified against Apple Root CA only, with the host name
++    // checked, and the URL bag may only send this session to https://*.apple.com. Upstream turned
++    // peer verification off, because gsa.apple.com chains to Apple's own root, which is not in
++    // public CA bundles (omacom/omarchy-plugin-marketplace#10755).
++    enum appleRootCA = "/opt/apple-root-ca.pem";
++
++    private string[string] headers;
+     private string[string] urlBag;
+ 
+     private ADI adi;
+@@ -382,10 +388,7 @@ public class ProvisioningSession {
+         this.adi = adi;
+         this.device = device;
+ 
+-        request = Request();
+-
+-        request.sslSetVerifyPeer(false);
+-        request.addHeaders([
++        headers = [
+             "User-Agent": "akd/1.0 CFNetwork/1404.0.5 Darwin/22.3.0",
+ 
+             // they are somehow not using the plist content-type in AuthKit
+@@ -405,11 +408,54 @@ public class ProvisioningSession {
+             // different apps can be used, I already saw fmfd and Setup here
+             // and Reprovision uses Xcode in some requests, so maybe it is possible here too.
+             "X-Apple-Client-App-Name": "Setup",
+-        ]);
++        ];
++    }
++
++    /// `url` if it is https on apple.com or a subdomain of it; throws otherwise.
++    static string appleURL(string url) {
++        import std.algorithm.searching : any, countUntil, endsWith, startsWith;
++        import std.exception : enforce;
++        enforce(url.startsWith("https://"), "refusing a provisioning URL that is not https: " ~ url);
++        string rest = url["https://".length .. $];
++        auto end = rest.countUntil!(c => c == '/' || c == '?' || c == '#');
++        string authority = end < 0 ? rest : rest[0 .. end];
++        enforce(!authority.any!(c => c == '@' || c == '\\'), "refusing a provisioning URL with user info: " ~ url);
++        auto colon = authority.countUntil(':');
++        string host = (colon < 0 ? authority : authority[0 .. colon]).toLower();
++        enforce(host == "apple.com" || (host.endsWith(".apple.com") && host.length > ".apple.com".length),
++            "refusing a provisioning URL outside apple.com: " ~ url);
++        return url;
++    }
++
++    /// GET (postBody is null) or POST to Apple through libcurl, which checks the chain against
++    /// Apple Root CA only and checks the host name. Redirects are not followed.
++    private string appleFetch(string url, string postBody = null) {
++        import std.net.curl : HTTP;
++        import std.exception : enforce;
++        auto http = HTTP();
++        http.caInfo = appleRootCA;
++        http.verifyPeer = true;
++        http.verifyHost = true;
++        http.maxRedirects = 0;
++        http.url = appleURL(url);
++        foreach (key, value; headers) {
++            if (key != "Content-Type") {
++                http.addRequestHeader(key, value);
++            }
++        }
++        if (postBody !is null) {
++            http.method = HTTP.Method.post;
++            http.setPostData(postBody, headers["Content-Type"]);
++        }
++        ubyte[] received;
++        http.onReceive = (ubyte[] data) { received ~= data; return data.length; };
++        http.perform();
++        enforce(http.statusLine.code / 100 == 2, format!"Apple answered %d for %s"(http.statusLine.code, url));
++        return cast(string) received;
+     }
+ 
+     public void loadURLBag() {
+-        string content = request.get("https://gsa.apple.com/grandslam/GsService2/lookup").responseBody.data!string();
++        string content = appleFetch("https://gsa.apple.com/grandslam/GsService2/lookup");
+ 
+         version (LibPlist) {
+             PlistDict plist = cast(PlistDict) Plist.fromXml(content);
+@@ -440,8 +486,8 @@ public class ProvisioningSession {
+ 
+         import std.datetime.systime;
+ 
+-        request.addHeaders([ "X-Apple-I-Client-Time": Clock.currTime().stripMilliseconds().toISOExtString() ]);
+-        string startProvisioningPlist = request.post(urlBag["midStartProvisioning"],
++        headers["X-Apple-I-Client-Time"] = Clock.currTime().stripMilliseconds().toISOExtString();
++        string startProvisioningPlist = appleFetch(urlBag["midStartProvisioning"],
+         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+ <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+ <plist version=\"1.0\">
+@@ -451,7 +497,7 @@ public class ProvisioningSession {
+ \t<key>Request</key>
+ \t<dict/>
+ </dict>
+-</plist>").responseBody.data!string();
++</plist>");
+ 
+         scope string spimStr;
+         {
+@@ -472,8 +518,8 @@ public class ProvisioningSession {
+         scope auto cpim = adi.startProvisioning(dsId, spim);
+         scope (failure) try { adi.destroyProvisioning(cpim.session); } catch(Throwable) {}
+ 
+-        request.addHeaders([ "X-Apple-I-Client-Time": Clock.currTime().stripMilliseconds().toISOExtString() ]);
+-        string endProvisioningPlist = request.post(urlBag["midFinishProvisioning"], format!"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
++        headers["X-Apple-I-Client-Time"] = Clock.currTime().stripMilliseconds().toISOExtString();
++        string endProvisioningPlist = appleFetch(urlBag["midFinishProvisioning"], format!"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+ <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+ <plist version=\"1.0\">
+ <dict>
+@@ -485,7 +531,7 @@ public class ProvisioningSession {
+ \t\t<string>%s</string>
+ \t</dict>
+ </dict>
+-</plist>"(Base64.encode(cpim.clientProvisioningIntermediateMetadata))).responseBody.data!string();
++</plist>"(Base64.encode(cpim.clientProvisioningIntermediateMetadata)));
+ 
+         scope ulong routingInformation;
+         scope ubyte[] persistentTokenMetadata;

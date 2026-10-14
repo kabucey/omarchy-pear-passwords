@@ -162,13 +162,16 @@ class ContainerHeaderTests(unittest.TestCase):
                     return {"cloudKitUserId": "_ckuser123"}
             return R()
 
-        orig = ck.requests.post
-        ck.requests.post = fake_post
-        try:
-            uid = ck.ck_app_init(ck.CUTTLEFISH_CONTAINER, ck.CUTTLEFISH_BUNDLE,
-                                 "16300000000", "MME-AUTH-TOKEN", _Anis())
-        finally:
-            ck.requests.post = orig
+        class _Session:
+            trust_env = None
+            verify = None
+
+            def post(self, url, **kwargs):
+                return fake_post(url, **kwargs)
+
+        session = _Session()
+        uid = ck.ck_app_init(ck.CUTTLEFISH_CONTAINER, ck.CUTTLEFISH_BUNDLE,
+                             "16300000000", "MME-AUTH-TOKEN", _Anis(), session=session)
 
         self.assertEqual(uid, "_ckuser123")
         self.assertEqual(captured["url"], ck.CK_APP_INIT_URL)
@@ -183,6 +186,8 @@ class ContainerHeaderTests(unittest.TestCase):
         # Basic(dsid : mmeAuthToken) - dsid is the username, mmeAuthToken the password
         self.assertEqual(hh["Authorization"],
                          "Basic " + base64.b64encode(b"16300000000:MME-AUTH-TOKEN").decode())
+        self.assertFalse(session.trust_env)
+        self.assertIs(session.verify, ck.VERIFY_TLS)
 
     def test_ckcode_invoke_headers_carry_userid_authtoken(self):
         # The CKCode header block adds x-cloudkit-userid (cloudKitUserId) + x-cloudkit-authtoken

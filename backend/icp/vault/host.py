@@ -35,6 +35,13 @@ class Credential:
     # Extra websites stored on the entry itself (metadata `s_as`). Unlike `aliases`, these are
     # a fact Apple records, and they are what the user edits.
     sites: tuple = ()
+    # A copy in Apple's Recently Deleted (its access group ends in -recently-deleted). Shown
+    # only as such, never as a live login, and never merged with the live copy.
+    recently_deleted: bool = False
+    # "passkey" for a row that is only a passkey (no password item for that account); a login
+    # that also has one carries has_passkey. The passkey's private key is never kept.
+    kind: str = "login"
+    has_passkey: bool = False
 
     def storage_dict(self) -> dict:
         """Everything, for the on-disk vault (encrypted)."""
@@ -43,6 +50,13 @@ class Credential:
              "aliases": list(self.aliases),
              "apple_history": [dict(h) for h in (self.apple_history or ())],
              "apple_title": self.apple_title, "sites": list(self.sites)}
+        # Only when set, so a 1.x-shaped dict stays exactly what it was.
+        if self.recently_deleted:
+            d["recently_deleted"] = True
+        if self.kind == "passkey":
+            d["kind"] = "passkey"
+        if self.has_passkey:
+            d["has_passkey"] = True
         if self.totp:
             t = dict(self.totp)
             s = t.get("secret")
@@ -162,11 +176,82 @@ def _name_matches_host(page: str, name: str) -> bool:
     return bool(labels & tokens)
 
 
+# Apple keeps Recently Deleted items in the same CKKS view, under a parallel access group per
+# live one (com.apple.cfnetwork-recently-deleted, com.apple.password-manager-recently-deleted,
+# com.apple.webkit.webauthn-recently-deleted, ...: Apple's Passwords view policy).
+RECENTLY_DELETED_SUFFIX = "-recently-deleted"
+# Passkeys: class `keys` items in this access group (older spelling com.apple.WebKit.WebAuthn).
+WEBAUTHN_AGRP = "com.apple.webkit.webauthn"
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+def agrp_of(it) -> str:
+    return str(it.get("agrp") or "")
+
+
+def is_recently_deleted(it) -> bool:
+    return agrp_of(it).endswith(RECENTLY_DELETED_SUFFIX)
+
+
+def is_passkey(it) -> bool:
+    base = agrp_of(it).removesuffix(RECENTLY_DELETED_SUFFIX)
+    return str(it.get("class") or "") == "keys" and base.lower() == WEBAUTHN_AGRP
+
+
+def _name(value) -> str:
+    """An access group, class or attribute name as the diagnostic may show it, or "?"."""
+    return value if isinstance(value, str) and _NAME_RE.match(value) else "?"
+
+
+def strip_and_shape(items) -> dict:
+    """Delete the private key (`v_Data`) of every class `keys` item, in place, before anything
+    else reads it, and return what the items look like without a single value:
+    {(class, agrp): {"count", "keys": {attribute names}, "inner_keys": {names}}}, where
+    inner_keys are the top-level names inside a password-manager metadata blob.
+
+    This is what op diag-items shows, once, to confirm the passkey and Recently Deleted
+    attribute names on a real keychain. Names that are not plain identifiers show as "?"."""
+    from ..keychain import metadata as _meta
+
+    shape: dict = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        names = {_name(k) for k in it}
+        if str(it.get("class") or "") == "keys":
+            it.pop("v_Data", None)
+        cls_, agrp = str(it.get("class") or ""), agrp_of(it)
+        key = (_name(cls_) if cls_ else "", _name(agrp) if agrp else "")
+        slot = shape.setdefault(key, {"count": 0, "keys": set(), "inner_keys": set()})
+        slot["count"] += 1
+        slot["keys"] |= names
+        inner = _meta.parse(it.get("v_Data"))
+        if inner is not None:
+            slot["inner_keys"] |= {_name(k) for k in inner}
+    return shape
+
+
+def _holds(obj, needle: bytes, depth: int = 0) -> bool:
+    """Whether a metadata blob holds `needle` (a passkey's credential id) as a value."""
+    if depth > 4:
+        return False
+    if isinstance(obj, (bytes, bytearray)):
+        return bytes(obj) == needle
+    if isinstance(obj, dict):
+        return any(_holds(v, needle, depth + 1) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return any(_holds(v, needle, depth + 1) for v in obj)
+    return False
+
+
 class CredentialStore:
     """In-memory read-only store. The pipeline builds this from decrypted keychain items."""
 
     def __init__(self, credentials=None):
         self._creds: list[Credential] = list(credentials or [])
+        # What from_items saw, as names and counts only (strip_and_shape).
+        self.item_shape: dict = {}
 
     def __len__(self) -> int:
         return len(self._creds)
@@ -189,7 +274,9 @@ class CredentialStore:
                 return 3
             return None
 
-        ranked = [(rank, c) for c in self._creds if (rank := match_rank(c)) is not None]
+        ranked = [(rank, c) for c in self._creds
+                  if not c.recently_deleted and c.kind != "passkey"
+                  and (rank := match_rank(c)) is not None]
         # exact-host matches first, then parent/subdomain, then label-only fallbacks; within a
         # tier, most-recently-used first (newest `mdat`), then title for a stable order.
         ranked.sort(key=lambda rc: (rc[0], -rc[1].mdat, rc[1].title, rc[1].username))
@@ -199,38 +286,61 @@ class CredentialStore:
     def from_items(cls, items) -> "CredentialStore":
         """Build from decrypted keychain item dicts (plist form). Apple `inet` password items use
         `srvr` (server/domain), `acct` (username), `v_Data` (plaintext password), `labl` (title);
-        tolerate the common variants."""
+        tolerate the common variants.
+
+        Two kinds of item are not plain logins. An item whose access group ends in
+        -recently-deleted is in Apple's Recently Deleted: it becomes its own credential flagged
+        `recently_deleted`, keyed apart from the live copy everywhere below, so it can neither
+        merge into the live entry nor lend it notes, a code or aliases. A class `keys` item in
+        the WebAuthn access group is a passkey: its `v_Data` (the private key) is deleted from
+        the dict before anything reads it, and it either marks the login for the same (rp id,
+        user) `has_passkey` or becomes a passkey-only row with no password."""
         from ..keychain import metadata as _meta
+
+        items = list(items)
+        shape = strip_and_shape(items)
+        items = [it for it in items if isinstance(it, dict)]
 
         def _key(it):
             return (str(it.get("srvr") or it.get("server") or it.get("domain")
                         or it.get("url") or it.get("svce") or ""),
                     str(it.get("acct") or it.get("username") or it.get("user") or ""))
 
+        def _rkey(it):
+            return (is_recently_deleted(it), *_key(it))
+
+        passkeys = [it for it in items if is_passkey(it)]
+        rest = [it for it in items if not is_passkey(it)]
+
         # Pass 1. Apple stores per-account attributes in a sibling item whose v_Data is a
         # binary plist, not a password. Upstream treated those as logins, so a third of the
         # vault had "bplist00..." as its password and the extension would have typed it into
-        # a form. Index them by (domain, account) and keep them out of the credential list.
+        # a form. Index them by (deleted, domain, account) and keep them out of the credential
+        # list.
         extras = {}
-        # (domain, account) pairs that a metadata stub names but no password item occupies.
+        # (deleted, account) -> domains a metadata stub names but no password item occupies.
         stub_domains = {}
+        # Every metadata record, for finding a passkey's account: (deleted, domain, account, blob).
+        sidecars = []
         pw_keys = set()
-        for it in items:
+        for it in rest:
             if not _meta.is_metadata(it.get("v_Data")):
-                pw_keys.add(_key(it))
-        for it in items:
+                pw_keys.add(_rkey(it))
+        for it in rest:
             meta = _meta.parse(it.get("v_Data"))
             if meta is None:
                 continue
-            k = _key(it)
-            if k not in pw_keys and k[0] and k[1] and _is_credential(k[0], str(it.get("labl") or "")):
-                stub_domains.setdefault(k[1], set()).add(k[0])
+            rk = _rkey(it)
+            sidecars.append((rk[0], rk[1], rk[2], meta))
+            if rk not in pw_keys and rk[1] and rk[2] \
+                    and _is_credential(rk[1], str(it.get("labl") or "")):
+                stub_domains.setdefault((rk[0], rk[2]), set()).add(rk[1])
             cfg, note = _meta.totp_config(meta), _meta.notes(meta)
             apple_hist = _meta.password_history(meta)
             apple_name = _meta.title(meta)
             extra_sites = _meta.sites(meta)
             if cfg or note or apple_hist or apple_name or extra_sites:
-                slot = extras.setdefault(_key(it), {})
+                slot = extras.setdefault(rk, {})
                 if extra_sites and not slot.get("sites"):
                     slot["sites"] = extra_sites
                 if apple_name and not slot.get("apple_title"):
@@ -243,9 +353,12 @@ class CredentialStore:
                     slot["apple_history"] = apple_hist
 
         creds = []
-        for it in items:
+        for it in rest:
             if _meta.is_metadata(it.get("v_Data")):
                 continue          # attributes, not a credential
+            if str(it.get("class") or "") == "keys":
+                continue          # a key item that is not a passkey: nothing to show
+            deleted = is_recently_deleted(it)
             domain = (it.get("srvr") or it.get("server") or it.get("domain")
                       or it.get("url") or it.get("svce") or "")
             username = it.get("acct") or it.get("username") or it.get("user") or ""
@@ -259,16 +372,68 @@ class CredentialStore:
             if (not domain and not username) or not (username or pw):
                 continue
             mdat = _to_unix(it.get("mdat") or it.get("cdat"))
-            extra = extras.get(_key(it), {})
+            extra = extras.get(_rkey(it), {})
             # Apple stores no pointer from a stub to its credential (path, sha1, UUID, vwht and
             # bin0 were all checked and none resolves), so association is inferred from the
             # account name. Never alias onto the credential's own domain.
-            alias = tuple(sorted(d for d in stub_domains.get(str(username), ())
+            alias = tuple(sorted(d for d in stub_domains.get((deleted, str(username)), ())
                                  if not domains_match(d, str(domain))))
             creds.append(Credential(domain=str(domain), username=str(username),
                                     password=str(pw), title=title, mdat=mdat,
                                     totp=extra.get("totp"), notes=extra.get("notes", ""),
                                     apple_history=tuple(extra.get("apple_history") or ()),
                                     apple_title=extra.get("apple_title", ""),
-                                    aliases=alias, sites=tuple(extra.get("sites") or ())))
-        return cls(creds)
+                                    aliases=alias, sites=tuple(extra.get("sites") or ()),
+                                    recently_deleted=deleted))
+
+        for it in passkeys:
+            deleted = is_recently_deleted(it)
+            rp, user, sidecar = _passkey_account(it, sidecars, deleted)
+            if not rp or not _is_credential(rp, rp):
+                continue
+            hits = [i for i, c in enumerate(creds)
+                    if c.kind == "login" and c.recently_deleted == deleted
+                    and c.username == user and _normalize_host(c.domain) == _normalize_host(rp)]
+            for i in hits:
+                creds[i] = dataclasses.replace(creds[i], has_passkey=True)
+            if hits:
+                continue
+            extra = extras.get((deleted, *sidecar), {}) if sidecar else {}
+            creds.append(Credential(domain=rp, username=user, password="", title=rp,
+                                    mdat=_to_unix(it.get("mdat") or it.get("cdat")),
+                                    notes=extra.get("notes", ""),
+                                    apple_title=extra.get("apple_title", ""),
+                                    sites=tuple(extra.get("sites") or ()),
+                                    recently_deleted=deleted, kind="passkey",
+                                    has_passkey=True))
+        store = cls(creds)
+        store.item_shape = shape
+        return store
+
+
+def _passkey_account(it, sidecars, deleted: bool):
+    """(rp id, user, sidecar key or None) for a passkey item.
+
+    The key item carries the rp id in `labl` and the credential id in `klbl`, but no account
+    name: that lives in the password-manager metadata record ("sidecar") Apple keeps for it.
+    The sidecar is the one that holds this credential id; failing that, the only account any
+    metadata record names at that rp id. UNVERIFIED on a real keychain (the Passkeys category
+    stays off until op diag-items confirms the names); with no unique answer the user is ""."""
+    rp = str(it.get("labl") or it.get("srvr") or "")
+    user = str(it.get("acct") or "")
+    same = [sc for sc in sidecars if sc[0] == deleted]
+    cid = it.get("klbl")
+    if isinstance(cid, (bytes, bytearray)) and len(cid) >= 16:
+        for sc in same:
+            if (not rp or _normalize_host(sc[1]) == _normalize_host(rp)) \
+                    and _holds(sc[3], bytes(cid)):
+                return rp or sc[1], user or sc[2], (sc[1], sc[2])
+    if not rp:
+        return "", "", None
+    at = [sc for sc in same if sc[2] and _normalize_host(sc[1]) == _normalize_host(rp)]
+    if user:
+        mine = [sc for sc in at if sc[2] == user]
+        return rp, user, ((mine[0][1], user) if mine else None)
+    if len({sc[2] for sc in at}) == 1:
+        return rp, at[0][2], (at[0][1], at[0][2])
+    return rp, "", None

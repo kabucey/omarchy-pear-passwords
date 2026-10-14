@@ -13,6 +13,11 @@ from ..proto.codec import decode_fields, first, first_str
 from ..transport import ckks
 from . import crypto as kc, nska
 from ..vault.host import CredentialStore
+from ..errors import AppleError
+
+
+class PipelineError(AppleError):
+    """A fetched item could not be authenticated; no partial snapshot may be committed."""
 
 # item-record fields that are NOT part of the per-item authenticated data (everything else is)
 _AAD_EXCLUDED = {"gen", "pcspublickey", "UUID", "data", "pcsservice", "pcspublicidentity",
@@ -75,16 +80,17 @@ def unwrap_tlkshares(tlkshares, our_peer_id: str,
             continue
         wrapped = share.get_str("wrappedkey")
         if not wrapped:
-            continue
+            raise PipelineError("a relevant TLK share has no wrapped key")
         try:
-            ies = nska.expand(base64.b64decode(wrapped))
+            ies = nska.expand(base64.b64decode(wrapped, validate=True))
             serialized = kc.ecies_decrypt_sf(our_encryption_key, ies)
-        except Exception:
-            continue                           # skip a poisoned/foreign share, keep the rest
+        except Exception as exc:
+            raise PipelineError("a relevant TLK share failed to decrypt") from exc
         f = decode_fields(serialized)
         key_id, tlk = first_str(f, 1), first(f, 4)
-        if key_id and tlk:
-            tlks[key_id] = tlk
+        if not key_id or not tlk:
+            raise PipelineError("a relevant TLK share has no key id or key material")
+        tlks[key_id] = tlk
     return tlks
 
 
@@ -113,17 +119,20 @@ def decrypt_items(items, class_keys: dict) -> list[dict]:
         data = it.get_bytes("data")
         wrapped = it.get_str("wrappedkey")
         if ck is None or data is None or not wrapped:
-            continue
-        item_key = kc.siv_unwrap(ck, base64.b64decode(wrapped))
+            raise PipelineError("an item is missing its class key, data, or wrapped key")
+        item_key = kc.siv_unwrap(ck, base64.b64decode(wrapped, validate=True))
         encver = it.fields.get("encver", 2)
         gen = it.fields.get("gen", 0)
         aad = authenticated_data_v2(it.record_name, it.fields, encver=encver, gen=gen,
                                     parent_key_id=parent)
         try:
             plaintext = kc.decrypt_item(item_key, data, aad)
-            out.append(plistlib.loads(plaintext))
-        except Exception:
-            continue  # skip an item we can't decrypt, keep the rest
+            parsed = plistlib.loads(plaintext)
+            if not isinstance(parsed, dict):
+                raise ValueError("item is not a plist dictionary")
+            out.append(parsed)
+        except Exception as exc:
+            raise PipelineError("an item failed to authenticate or parse") from exc
     return out
 
 
