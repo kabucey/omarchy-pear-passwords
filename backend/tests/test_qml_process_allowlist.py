@@ -147,8 +147,12 @@ def used_omarchy_files() -> list[str]:
     while todo:
         path = todo.pop()
         code = qmlscan.blank_strings(qmlscan.strip_comments(qmlscan.read(path)))
+        # Bare (Color.x) or through an alias (import qs.Commons as Commons; Commons.Color.x),
+        # which Theme.qml needs since QtQuick 6.12's own Color shadows the bare name.
+        aliases = re.findall(r"^\s*import\s+qs\.Commons\s+as\s+(\w+)", code, re.M)
+        qualifier = rf"(?:(?:{'|'.join(aliases)})\.)?" if aliases else ""
         for name, target in singletons.items():
-            if target not in used and re.search(rf"(?<![\w.]){name}\.", code):
+            if target not in used and re.search(rf"(?<![\w.]){qualifier}{name}\.", code):
                 used.add(target)
                 todo.append(target)
     return sorted(used) + files
