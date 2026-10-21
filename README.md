@@ -118,7 +118,7 @@ one command for you to run with sudo:
 
 <!-- pinned: tools/gen-sha256sums.sh keeps the hash below equal to sha256(SHA256SUMS) -->
 ```sh
-sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "5e1ea0dbe2a0703e8b2ceed1a33c35e6af13e58994893280f20761dc36a7e595  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
+sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "a8e389c208df62c24b75766c5a70af540bfda7b4c76cbcfa3470093bb8b8a38f  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
 ```
 
 The command copies the stage into a fresh directory only root can write, checks that its
