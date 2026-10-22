@@ -21,9 +21,8 @@ Omarchy's own shell components.
 - **Your passwords on iCloud, synced.** It signs in as a Mac would and is approved as one of
   your devices once. While Pear is open and unlocked it syncs when you unlock, every two hours
   and when you ask. Apple should not ask for a code again unless it signs you out.
-- **Locked until you say so, one account at a time.** Opening Pear shows one dialog, with your
-  fingerprint or password, and only then the list of accounts. Revealing, copying or changing
-  one account's password asks once more, naming that account.
+- **Unlock once per session.** Opening Pear asks for your fingerprint or password. Reveal,
+  copy, codes, notes, history and edits then use that unlocked session until Pear locks.
 - **Click to copy.** Username, password, website and verification code. A copied password is
   gone from the clipboard after one paste, or after 30 seconds.
 - **Add passwords.** **+ New** saves a login to iCloud, with a generated password if you want
@@ -69,13 +68,12 @@ autofill hosts once you turn autofill on in the window. While autofill is on, an
 running as you can connect the way a browser does; it still gets a password only if you approve
 that fill's dialog (see [Autofill](#autofill-bring-your-own-extension)).
 
-You see these dialogs, both drawn by Omarchy's own polkit agent, and nothing else ever
+You see these dialogs, all drawn by Omarchy's own polkit agent, and nothing else ever
 asks for a password:
 
 | Action | The dialog says | When |
 | --- | --- | --- |
 | `io.github.dragosol.pearpasswords.unlock` | Unlock Pear Passwords to show your accounts | Each time you open Pear, and after it locks |
-| `io.github.dragosol.pearpasswords.reveal` | Use the saved password for $(account) | The first reveal, copy, code, notes, history or edit of one account |
 | `io.github.dragosol.pearpasswords.manage` | Change Pear Passwords on this computer | Signing in or out, adding or deleting, moving from 1.x, starting over, deleting the old 1.x copy, checking clipboard history, turning browser autofill on, moving your keys onto the security chip, turning a category that waits for a check (Passkeys, Recently Deleted) on or off, reading the keychain diagnostic |
 | `io.github.dragosol.pearpasswords.autofill` | A browser extension asks to fill the password for $(account) on $(origin) | Every browser fill, if you set up autofill |
 | `io.github.dragosol.pearpasswords.autofill-names` | A browser extension asks to see which accounts you have saved for $(origin) | When the browser's picker asks to name a site's accounts before any fill (once per site until Pear locks) |
@@ -83,9 +81,10 @@ asks for a password:
 1. **Opening Pear** asks once. Approving releases the list of accounts: names, sites and
    usernames, never a password. The list shows straight away from the last sync, with "synced
    N min ago", and a fresh sync replaces it.
-2. **One account** asks again, with that account's name in the dialog. Approving opens just
-   that account for **2 minutes** (the status bar counts down from 2:00). Selecting another
-   account closes it at once. Copying a username or a website never asks.
+2. **Using an account** needs no further password or fingerprint. Reveal, copy, codes,
+   notes, history and edits reuse the unlocked window session. Only one account's secret
+   buffer stays open at a time, for **2 minutes** by default (the status bar counts down from
+   2:00). Switching accounts or reopening an expired buffer never prompts; locking Pear ends access.
 3. **A revealed password** shows for at most 20 seconds, or until the window loses focus.
 
 Each dialog takes your fingerprint first. The password field appears if the reader times out
@@ -120,7 +119,7 @@ one command for you to run with sudo:
 
 <!-- pinned: tools/gen-sha256sums.sh keeps the hash below equal to sha256(SHA256SUMS) -->
 ```sh
-sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "a2502a9b10d74f014fba5adf45b39ed80eeb59b4016bdfbc39ac77ad5857ca8d  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
+sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "2166a3e5aae6bdd2dbb8f74d3e786d02d78dc0d297a75af02346e94961c13673  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
 ```
 
 The command copies the stage into a fresh directory only root can write, checks that its
@@ -147,7 +146,7 @@ The system step installs, and records in a receipt (`/var/lib/pear-passwords-ins
 | The rule that creates the vault directory | `/etc/tmpfiles.d/pear-passwords.conf` |
 | The installed version and the hash of its `SHA256SUMS` | `/usr/local/lib/pear-passwords/VERSION` |
 | The window's system-only font configuration and the root uninstaller | `/usr/local/lib/pear-passwords/etc/fonts.conf`, `/usr/local/lib/pear-passwords/libexec/uninstall-root` |
-| The five polkit actions | `/usr/share/polkit-1/actions/io.github.dragosol.pearpasswords.policy` |
+| The four polkit actions | `/usr/share/polkit-1/actions/io.github.dragosol.pearpasswords.policy` |
 | The `pear-passwords` user and the empty `pear-client` group | `/etc/sysusers.d/pear-passwords.conf` |
 | Your vault, readable only by `pear-passwords` | `/var/lib/pear-passwords/u<uid>/` |
 | The launcher | `/usr/local/share/applications/io.github.dragosol.PearPasswords.desktop` |
@@ -477,11 +476,11 @@ the design and the gates still to be verified in a VM).
   compiled from source on your machine. It scrubs the environment and runs one of four fixed
   root-owned programs, which the kernel then protects from debugging and memory reads. The
   service checks every connection's group, process and parent again. <!-- tests: test_daemon_peer.py test_pear_exec_env.py test_tickets.py -->
-- **Two dialogs, never remembered.** Every action is `auth_self` for an active local session
+- **Authentication dialogs are never cached.** Every polkit action is `auth_self` for an active local session
   only, with no `_keep`, and the service checks it against the exact process that asked.
   <!-- tests: test_policy_file.py test_policy_readme_sync.py test_daemon_polkit.py test_repo_guards.py::PolicyGuardTests -->
-- **One account at a time.** A second dialog names the account, and opens only that one for
-  2 minutes; another account needs its own. <!-- tests: test_grants.py test_protocol_contract.py::ProtocolValueTests -->
+- **Unlock once, open one account at a time.** Account actions reuse the authenticated window
+  session. Each secret buffer lasts 2 minutes by default; a lock wipes it and ends access. <!-- tests: test_grants.py test_protocol_contract.py::ProtocolValueTests -->
 - **No other password prompt, anywhere.** No zenity, no terminal prompt, no passphrase: the
   1.x passphrase is asked once, inside the window, only if needed to move your vault.
   <!-- tests: test_no_secret_prompts.py test_apple_ctx.py -->
@@ -536,8 +535,8 @@ the design and the gates still to be verified in a VM).
 Python zeroization is best effort, and a revealed value in the window cannot be wiped from
 memory, only replaced; the boundaries that matter are the separate user, the protected
 processes and the sandbox. While Pear is unlocked the service holds the Apple tokens that sync
-needs, so during that window the per-account dialog is enforced by the service's code rather
-than by cryptography.
+needs. During that window the service enforces access through the authenticated UI connection
+and opens account secrets only on demand.
 
 ## Uninstall
 

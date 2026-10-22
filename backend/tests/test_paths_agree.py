@@ -78,7 +78,7 @@ class PathsAgreeTests(unittest.TestCase):
             self.assertTrue(os.path.isabs(argv[0]))
 
     def test_policy_ids(self):
-        self.assertEqual(len(paths.ACTIONS), 5)
+        self.assertEqual(len(paths.ACTIONS), 4)
         for a in paths.ACTIONS:
             self.assertTrue(a.startswith(paths.POLKIT_ACTION_PREFIX + "."), a)
         self.assertEqual(paths.ACTION_AUTOFILL, "io.github.dragosol.pearpasswords.autofill")

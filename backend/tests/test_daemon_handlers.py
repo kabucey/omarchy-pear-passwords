@@ -444,7 +444,7 @@ class EditTests(Base):
         self.assertRegex(new, r"^[a-zA-Z0-9]{6}-[a-zA-Z0-9]{6}-[a-zA-Z0-9]{6}$")
         self.assertNotIn(new, str(self.ui.raw))
         self.assertEqual((await self.ui.call("reveal", id="e.0", field="password"))["value"], new)
-        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK, paths.ACTION_REVEAL])
+        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK])
 
     async def test_set_validation(self):
         await self.ui.call("grant", id="e.0")
@@ -626,7 +626,7 @@ class NotesBodyTests(Base):
         r = await self.ui.call("set", id="e.0", fields={"tags": ["#Home", "home", "Finance"]})
         self.assertEqual(r, {"rid": self.ui.rid, "id": "e.0", "synced": True})
         self.assertEqual(self.h.apple.last_fields, {"tags": ["home", "finance"]})
-        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK, paths.ACTION_REVEAL])
+        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK])
 
     async def test_set_notes_sends_the_body_for_the_daemon_to_splice(self):
         await self.ui.call("grant", id="e.0")
@@ -690,7 +690,7 @@ class CopyTextTests(Base):
         # The single-use grant is still there: copy-text read nothing from it.
         self.assertEqual((await self.ui.call("reveal", id="e.0", field="password"))["value"],
                          "pw-0-fake")
-        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK, paths.ACTION_REVEAL])
+        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK])
 
     async def test_bad_source_id_and_text(self):
         await self.ui.call("grant", id="e.0")
@@ -730,7 +730,7 @@ class CopyTextTests(Base):
         r = await self.ui.call("copy-text", source="create-password", text="eleventh")
         self.assertEqual(r["error"], "rate-limited")
         self.assertTrue(1 <= r["retry_after"] <= 60)
-        # The dialogs' own limit is untouched: a grant still raises its dialog.
+        # Account access still works after copy-text reaches its own limit.
         self.assertIn("fields", await self.ui.call("grant", id="e.0"))
         self.clock.advance(60)
         self.assertIn("ticket", await self.ui.call("copy-text", source="create-password",

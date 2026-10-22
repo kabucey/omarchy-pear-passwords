@@ -1,4 +1,4 @@
-"""Per-entry grants: the second dialog opens one account for `grant_s` seconds, and no other.
+"""Per-entry grants: an unlocked UI opens one account for `grant_s` seconds, and no other.
 
 One grant per uid. A grant holds the entry's opened Secrets for its lifetime, so reveal, copy,
 totp and edit never unseal SK_secret again; when it ends the buffer is dropped (and zeroed

@@ -240,9 +240,10 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(st.unseal_count, before)
         self.assertEqual(st.load_nicknames()[gh], "Work GitHub")
 
+        dialogs = self.authority.actions()
         g = await self.ui.call("grant", id=gh, timeout=30)
         self.assertNotIn("error", g, g)
-        self.assertEqual(self.authority.actions()[-1], paths.ACTION_REVEAL)
+        self.assertEqual(self.authority.actions(), dialogs)
         rv = await self.ui.call("reveal", id=gh, field="password", timeout=30)
         self.assertEqual(rv["value"], "gh-TEST-pw-1")
         hist = await self.ui.call("history", id=gh, timeout=30)

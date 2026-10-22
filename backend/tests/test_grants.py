@@ -1,5 +1,7 @@
-"""Per-entry grants (docs/protocol.md 6.3-6.5): one dialog opens one account, for grant_s."""
+"""Per-entry grants (docs/protocol.md 6.3-6.5): an unlocked session opens one account, for grant_s."""
 
+import asyncio
+import threading
 import unittest
 
 from daemon_fakes import FakeClock, Harness, secrets
@@ -81,18 +83,24 @@ class GrantFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.h.stop()
 
-    async def test_grant_raises_reveal_dialog_naming_the_account(self):
+    async def test_grant_uses_the_unlocked_session_without_another_dialog(self):
         r = await self.ui.call("grant", id="e.0")
         self.assertEqual(r["fields"], ["password", "notes", "code", "history"])
         self.assertEqual((r["grant_s"], r["single_use"]), (120, False))
-        _, action, details, _ = self.h.authority.calls[-1]
-        self.assertEqual(action, paths.ACTION_REVEAL)
-        self.assertEqual(details, {"account": "Site 0 — user0"})
+        self.assertEqual(self.h.authority.actions(), [paths.ACTION_UNLOCK])
         self.assertEqual(self.st.unseal_count, 1)
         reveal = await self.ui.call("reveal", id="e.0", field="password")
         self.assertEqual((reveal["value"], reveal["hide_after"]), ("pw-0-fake", 20))
         self.assertEqual((await self.ui.call("reveal", id="e.0", field="notes"))["value"], "note")
         self.assertEqual(self.st.unseal_count, 1)          # served from the grant buffer
+        # Switching accounts and reopening an expired buffer reuse the same unlock.
+        for id in ("e.1", "e.0", "e.0"):
+            self.clock.advance(protocol.GRANT_S_DEFAULT)
+            self.assertIn("fields", await self.ui.call("grant", id=id))
+            self.assertEqual((await self.ui.call("reveal", id=id, field="password"))["value"],
+                             f"pw-{id[-1]}-fake")
+            self.assertIn("ticket", await self.ui.call("copy", id=id, field="password"))
+        self.assertEqual(self.h.authority.actions(), [paths.ACTION_UNLOCK])
 
     async def test_grant_for_a_does_not_open_b(self):
         await self.ui.call("grant", id="e.0")
@@ -170,18 +178,63 @@ class GrantFlowTests(unittest.IsolatedAsyncioTestCase):
         hist = await self.ui.call("history", id="e.0")
         self.assertEqual(len(hist["items"]), 2)
 
-    async def test_dismissed_grant_opens_nothing(self):
-        self.h.authority.outcome = "dismissed"
-        self.assertEqual((await self.ui.call("grant", id="e.0"))["error"], "dismissed")
-        self.assertEqual((await self.ui.call("reveal", id="e.0", field="password"))["error"],
-                         "no-grant")
-        self.assertEqual(self.st.unseal_count, 0)
+    async def test_grant_does_not_need_an_available_authentication_agent(self):
+        self.h.authority.outcome = "no-agent"
+        self.assertIn("fields", await self.ui.call("grant", id="e.0"))
+        self.assertEqual((await self.ui.call("reveal", id="e.0", field="password"))["value"],
+                         "pw-0-fake")
+        self.assertEqual(self.h.authority.actions(), [paths.ACTION_UNLOCK])
 
     async def test_grant_needs_tier1(self):
         await self.ui.call("lock")
         self.assertEqual((await self.ui.call("grant", id="e.0"))["error"], "locked")
         self.assertEqual((await self.ui.call("reveal", id="e.0", field="password"))["error"],
                          "locked")
+        self.assertEqual((await self.ui.call("copy", id="e.0", field="password"))["error"],
+                         "locked")
+
+    async def test_pending_entry_read_is_discarded_when_access_changes(self):
+        for method in ("get_meta", "open_entry"):
+            for action in ("release", "lock", "grant"):
+                with self.subTest(method=method, action=action):
+                    await self.ui.call("unlock")
+                    started, proceed = threading.Event(), threading.Event()
+                    real = getattr(self.st, method)
+                    returned = []
+
+                    def slow(id):
+                        value = real(id)
+                        returned.append(value)
+                        started.set()
+                        proceed.wait(5)
+                        return value
+
+                    setattr(self.st, method, slow)
+                    try:
+                        pending = self.ui.send("grant", id="e.0")
+                        self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                        if action == "grant":
+                            newer = self.ui.send("grant", id="e.1")
+                            # The following reply is a barrier: the daemon has started
+                            # the earlier grant request, which is waiting on the store.
+                            await self.ui.call("settings", get=True)
+                        else:
+                            await self.ui.call(action)
+                    finally:
+                        proceed.set()
+                        setattr(self.st, method, real)
+                    reply = await asyncio.wait_for(pending, 5)
+                    self.assertEqual(reply.get("error"),
+                                     "locked" if action == "lock" else "cancelled")
+                    if action == "grant":
+                        self.assertEqual((await asyncio.wait_for(newer, 5))["id"], "e.1")
+                        self.assertEqual((await self.ui.call("reveal", id="e.1",
+                                                             field="password"))["value"],
+                                         "pw-1-fake")
+                    else:
+                        self.assertIsNone(self.h.reg.grants.current(U))
+                    if method == "open_entry":
+                        self.assertEqual(returned[0].password, "")
 
     async def test_unknown_or_malformed_id(self):
         self.assertEqual((await self.ui.call("grant", id="nope"))["error"], "not-found")

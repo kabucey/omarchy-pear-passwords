@@ -1,7 +1,7 @@
 """The README's dialog table, docs/protocol.md and the installed polkit policy agree.
 
 What a user is told a dialog says, and when, must be what the policy file makes the dialog
-say and what the daemon raises it for. All five actions, including `.autofill`, are checked.
+say and what the daemon raises it for. All four actions, including `.autofill`, are checked.
 The policy file is the daemon's; until it is on the branch, only the README and protocol.md are
 compared, and the policy half is reported as skipped.
 """
@@ -61,7 +61,6 @@ class PolicyReadmeSyncTests(unittest.TestCase):
         # Every op that raises a dialog is covered by the README's "when" column, in words.
         when = {
             "unlock": (paths.ACTION_UNLOCK, "open"),
-            "grant": (paths.ACTION_REVEAL, "reveal"),
             "create": (paths.ACTION_MANAGE, "adding"),
             "delete": (paths.ACTION_MANAGE, "deleting"),
             "signin": (paths.ACTION_MANAGE, "Signing in"),

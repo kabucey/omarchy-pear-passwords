@@ -580,7 +580,6 @@ async def op_lock(reg, conn, req):
 
 async def op_release(reg, conn, req):
     reg.release_grant(conn.uid)
-    reg.cancel_prompts(conn=conn, action=paths.ACTION_REVEAL)
     return {"released": True}
 
 
@@ -600,14 +599,25 @@ async def op_cancel(reg, conn, req):
 async def op_grant(reg, conn, req):
     id = _need_id(req)
     s = _tier1(reg, conn)
-    meta = await _store(reg, conn.uid, s.store.get_meta, id)
-    reg.release_grant(conn.uid)
     epoch = s.epoch
-    await reg.authorize(conn, paths.ACTION_REVEAL, {"account": wire.account_label(meta)})
+    s.grant_serial += 1
+    serial = s.grant_serial
+    meta = await _store(reg, conn.uid, s.store.get_meta, id)
     _still(s, conn, epoch)
+    if s.grant_serial != serial:
+        raise OpError("cancelled")
+    reg.release_grant(conn.uid)
+    serial = s.grant_serial
+    # This exact UI connection already authenticated at unlock. Open one entry's
+    # temporary buffer without asking polkit again; every lock still ends access.
     secrets_ = await _store(reg, conn.uid, s.store.open_entry, id)
-    if s.epoch != epoch or not s.unlocked():
-        raise OpError("locked")
+    try:
+        _still(s, conn, epoch)
+        if s.grant_serial != serial:
+            raise OpError("cancelled")
+    except OpError:
+        wipe_secrets(secrets_)
+        raise
     g = reg.put_grant(s, id, secrets_)
     fields = ["password"] if getattr(meta, "has_password", True) else []
     if meta.has_notes:                       # the body, without the tag line

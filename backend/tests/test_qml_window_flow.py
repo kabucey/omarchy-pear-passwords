@@ -413,12 +413,11 @@ class WindowFlowTests(unittest.IsolatedAsyncioTestCase):
                                  "edit tags", "copy-text", "copy fails", "features", "create",
                                  "lock"])
 
-        # The dialogs: the list, the one account, then .manage for turning a category on, the
-        # keychain check and the new entry. Copy-text and the drop-down raise none.
+        # Unlock, then .manage for the category, keychain check and new entry.
+        # Account access, copy-text and the drop-down raise no dialog.
         self.assertEqual(self.authority.actions(),
-                         [paths.ACTION_UNLOCK, paths.ACTION_REVEAL, paths.ACTION_MANAGE,
+                         [paths.ACTION_UNLOCK, paths.ACTION_MANAGE,
                           paths.ACTION_MANAGE, paths.ACTION_MANAGE])
-        self.assertIn("GitHub", self.authority.calls[1][2]["account"])   # the one it opened
 
         # set {tags}: spliced onto the notes, the body untouched.
         self.assertIn(("push_set", GH, ["tags"]), self.apple.calls)

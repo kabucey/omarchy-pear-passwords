@@ -249,12 +249,11 @@ lease: a locked uid does not sync.
 | action | message | raised by |
 |---|---|---|
 | `io.github.dragosol.pearpasswords.unlock` | Unlock Pear Passwords to show your accounts | `unlock` |
-| `io.github.dragosol.pearpasswords.reveal` | Use the saved password for $(account) | `grant` |
 | `io.github.dragosol.pearpasswords.manage` | Change Pear Passwords on this computer | `create`, `delete`, `signin`, `signout`, `migrate-begin`, `reset`, `purge-old-copy`, `clip-history-check`, `autofill-enable`, `tpm-move`, `features` (a change), `diag-items` |
 | `io.github.dragosol.pearpasswords.autofill` | A browser extension asks to fill the password for $(account) on $(origin) | `autofill-fill` |
 | `io.github.dragosol.pearpasswords.autofill-names` | A browser extension asks to see which accounts you have saved for $(origin) | `autofill-names` (only for a site not yet named) |
 
-All five: `auth_self` for active local sessions, `no` for any and inactive, no `_keep`, owner
+All four: `auth_self` for active local sessions, `no` for any and inactive, no `_keep`, owner
 annotation `unix-user:pear-passwords`. No other op ever raises a dialog.
 
 - Subject: `unix-process` with the connection's `pidfd` (and `uid`); fallback
@@ -274,15 +273,14 @@ annotation `unix-user:pear-passwords`. No other op ever raises a dialog.
 | no agent registered (G7), or polkitd/the bus unreachable | `no-agent` | no |
 | polkitd refused the call itself (`NotAuthorized`, a bad subject) | `internal` | no |
 | agent busy with another dialog | `busy` | no |
-| cancelled by the daemon (EOF, `cancel`, superseded `grant`) | `cancelled` | no |
+| cancelled by the daemon (EOF, `cancel`, lock) | `cancelled` | no |
 
 - Rate limits, per uid and **bucket** (`ui` for the window's ops, `autofill` for the browser's):
-  - one outstanding dialog per bucket: a second prompt-raising op gets `prompt-pending`
-    (except `grant`, which supersedes a pending `grant`: the old one gets `cancelled`);
+  - one outstanding dialog per bucket: a second prompt-raising op gets `prompt-pending`;
   - at most **3 refused** (dismissed or denied) dialogs per rolling minute per bucket and
     action; the next op raising that action gets
     `{"error":"rate-limited","retry_after":<seconds>}` without a dialog. Approvals are not
-    counted, so opening one account after another never runs into the limit.
+    counted. Account grants never prompt and do not spend this budget.
 - For `unlock` a refusal is a normal reply, not an error (section 6.1). For every other op it
   is `{"rid":n,"error":"<code>"}`.
 
@@ -327,7 +325,7 @@ window then offers the move as a button (`tpm-move`, section 6.9).
 ```
 
 - `lock`: lock trigger `user` (section 4.2). Then also the `locked` event.
-- `release`: drop the current grant (if any) and cancel a pending `grant` dialog. The UI sends
+- `release`: drop the current grant (if any) and invalidate pending entry reads. The UI sends
   it whenever the selected account changes. Never an error.
 - `cancel`: cancel the pending request with rid `target` on this connection if it is a
   prompt-raising op or `signin`; that request then replies `cancelled`. `cancelled:false` if
@@ -339,8 +337,10 @@ window then offers the move as a button (`tpm-move`, section 6.9).
 {"op":"grant","rid":5,"id":"<id>"}
 ```
 
-Needs tier 1. Wipes any existing grant (one grant per uid), then raises `.reveal` with
-`account` for that entry. Success:
+Needs tier 1 on the exact UI connection that authenticated at unlock. Never prompts.
+Wipes any existing grant (one grant per uid), then opens that entry's temporary secret buffer.
+A lock, release or newer grant during the read discards its result. Switching accounts and
+reopening expired buffers reuse the same unlocked session. Success:
 
 ```json
 {"rid":5,"id":"<id>","expires":1791450120.0,"grant_s":120,"single_use":false,
@@ -893,7 +893,7 @@ traceback.
 | `lock` | ui | – | – | `{locked:true}` |
 | `release` | ui | – | – | `{released:true}` |
 | `cancel` | ui | – | – | `{cancelled}` |
-| `grant` | ui | `.reveal` | tier 1 | `{id, expires, grant_s, single_use, fields}` |
+| `grant` | ui | – | tier 1 | `{id, expires, grant_s, single_use, fields}` |
 | `reveal` | ui | – | grant | `{id, field, value, hide_after:20}` |
 | `totp` | ui | – | grant | `{id, code, valid_until}` |
 | `history` | ui | – | grant | `{id, items:[{date, value, source}]}` |

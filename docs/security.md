@@ -7,7 +7,8 @@ a claim has none or names a test that does not exist. The wire protocol is in
 [protocol.md](protocol.md), and the browser-facing autofill messages in
 [autofill-protocol.md](autofill-protocol.md).
 
-Owner decisions that override the original design: a per-account grant lasts **120 s**, a
+Owner decisions that override the original design: the window authenticates **once per
+unlocked session**, account grants never prompt; a per-account grant lasts **120 s**, a
 clipboard offer **30 s**; the 1.x vault is imported **once**; browser autofill is a generic,
 **opt-in** native-messaging host with **no bundled extension**; there is **no sync lease**, so
 a locked computer does not sync.
@@ -124,7 +125,8 @@ Per user, in `/var/lib/pear-passwords/u<uid>/` (0700 `pear-passwords`; your uid 
   `HMAC(K_pwmac, password)`, so sync never unseals `SK_secret`. Tests:
   `test_pwmac_sync_diff.py`.
 - In memory: nothing while locked; `RK_list`, its subkeys and the metadata after the first
-  dialog; one entry's fields for at most the grant (120 s) after the second. Tests:
+  unlock dialog; one entry's fields for at most the grant (120 s), opened on demand by that
+  authenticated UI connection without another dialog. Tests:
   `test_grants.py`, `test_logind_lock.py`.
 - **The tag line is tier-1 list metadata.** Whatever is on a note's final `Tags:` line is list
   metadata, not a secret: it is visible to anyone who passes the first dialog, like titles and

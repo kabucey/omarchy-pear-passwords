@@ -561,8 +561,8 @@ class RateLimitTests(Base):
         for _ in range(3):
             self.fill()
         self.assertEqual(self.fill_error().code, "rate-limited")
-        # the window can still unlock or reveal: autofill never starves it
-        run(self.reg.authorize(self.ui, paths.ACTION_REVEAL, {"account": "x"}))
+        # the window can still unlock: autofill never starves it
+        run(self.reg.authorize(self.ui, paths.ACTION_UNLOCK, {}))
 
     def test_one_dialog_at_a_time(self):
         async def two():

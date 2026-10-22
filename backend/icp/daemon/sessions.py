@@ -123,6 +123,7 @@ class Session:
         self.old_copy: dict | None = None
         self.settings_loaded = False
         self.show_all = False              # unlock{all:true}
+        self.grant_serial = 0              # invalidates an entry read on release/new grant
         self.epoch = 0                     # bumped by every lock
         self.busy: str | None = None       # "sync" | "signin" | "edit" while Apple work runs
         self.signin = None                 # the live SocketFrontend
@@ -262,13 +263,9 @@ class Registry:
         key = (conn.uid, bucket)
         old = self._pending.get(key)
         if old is not None:
-            if action == paths.ACTION_REVEAL and old.action == paths.ACTION_REVEAL \
-                    and old.conn is conn:
-                self._cancel(old)            # a new grant supersedes the pending one
-            else:
-                raise OpError("prompt-pending")
-        # Answers that said no are counted per action, so dismissing reveal dialogs never
-        # holds up an unlock, and approvals are not counted at all.
+            raise OpError("prompt-pending")
+        # Refusals are counted per action, so dismissing a management dialog never
+        # holds up an unlock. Approvals are not counted at all.
         answered = self._answered.setdefault((*key, action), deque())
         now = self.clock()
         while answered and now - answered[0] >= 60:
@@ -610,6 +607,9 @@ class Registry:
             after_reply(lambda: self.notify_ui(uid, {"event": "grant-expired", "id": gid}))
 
     def release_grant(self, uid: int) -> None:
+        s = self.get(uid)
+        if s is not None:
+            s.grant_serial += 1
         self._drop_grant(uid, event=True)
 
     def _cancel_timer(self, uid: int) -> None:

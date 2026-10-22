@@ -136,7 +136,7 @@ class AuthorityTests(unittest.TestCase):
         auth = Authority(bus=bus, clock=self.clock)
         result = []
         t = threading.Thread(target=lambda: result.append(
-            auth.check(self.subject, paths.ACTION_REVEAL, {}, "pear-7")))
+            auth.check(self.subject, paths.ACTION_MANAGE, {}, "pear-7")))
         t.start()
         auth.cancel("pear-7")
         release.set()
@@ -259,17 +259,15 @@ class PromptRuleTests(unittest.IsolatedAsyncioTestCase):
         await self.h.unlock(self.ui)
         self.auth.outcome = polkit.DISMISSED
         for _ in range(3):
-            self.assertEqual((await self.ui.call("grant", id="e.0"))["error"], "dismissed")
-        r = await self.ui.call("grant", id="e.0")
+            self.assertEqual((await self.ui.call("delete", id="e.0"))["error"], "dismissed")
+        r = await self.ui.call("delete", id="e.0")
         self.assertEqual(r["error"], "rate-limited")
         self.assertIn("retry_after", r)
 
     async def test_approvals_never_hold_up_the_next_dialog(self):
-        # Gate bug 6: unlock plus two accounts used up the minute; the third account (or a
-        # reopened window) got rate-limited with no dialog.
         await self.h.unlock(self.ui)
         for i in range(6):
-            r = await self.ui.call("grant", id=f"e.{i % 2}")
+            r = await self.ui.call("create", fields={"domain": f"a{i}.example", "password": "p"})
             self.assertNotIn("error", r, i)
         self.assertEqual(len(self.auth.calls), 7)
 
@@ -277,18 +275,19 @@ class PromptRuleTests(unittest.IsolatedAsyncioTestCase):
         await self.h.unlock(self.ui)
         self.auth.outcome = polkit.DISMISSED
         for _ in range(3):
-            await self.ui.call("grant", id="e.0")
-        self.assertEqual((await self.ui.call("grant", id="e.0"))["error"], "rate-limited")
-        self.assertEqual((await self.ui.call("delete", id="e.1"))["error"], "dismissed")
+            await self.ui.call("delete", id="e.0")
+        self.assertEqual((await self.ui.call("delete", id="e.0"))["error"], "rate-limited")
+        await self.ui.call("lock")
+        self.assertEqual((await self.ui.call("unlock"))["reason"], "dismissed")
 
     async def test_an_unanswered_denial_is_not_counted(self):
         # Gate bug 8: an agent that dies mid-dialog (or a policy "no") is denied, not counted.
         await self.h.unlock(self.ui)
         self.auth.outcome = polkit.DENIED_UNANSWERED
         for _ in range(5):
-            self.assertEqual((await self.ui.call("grant", id="e.0"))["error"], "denied")
+            self.assertEqual((await self.ui.call("delete", id="e.0"))["error"], "denied")
         self.auth.outcome = polkit.AUTHORIZED
-        self.assertNotIn("error", await self.ui.call("grant", id="e.0"))
+        self.assertNotIn("error", await self.ui.call("delete", id="e.0"))
 
     async def test_unlock_waits_out_the_sync_it_starts(self):
         # Round 2 gate finding 4: the sync an unlock starts made the next dialog op busy-sync
@@ -319,26 +318,6 @@ class PromptRuleTests(unittest.IsolatedAsyncioTestCase):
                          True)
         self.assertEqual((await asyncio.wait_for(pending, WAIT))["error"], "cancelled")
         self.assertEqual(len(self.auth.cancels), 1)
-
-    async def test_new_grant_supersedes_a_pending_one(self):
-        await self.h.unlock(self.ui)
-        self.auth.block = True
-        self.auth.started.clear()
-        first = self.ui.send("grant", id="e.0")
-        self.assertTrue(await asyncio.to_thread(self.auth.started.wait, WAIT))
-        self.auth.block = False
-        second = await self.ui.call("grant", id="e.1")
-        self.assertEqual(second["id"], "e.1")
-        self.assertEqual((await asyncio.wait_for(first, WAIT))["error"], "cancelled")
-
-    async def test_release_cancels_a_pending_grant(self):
-        await self.h.unlock(self.ui)
-        self.auth.block = True
-        self.auth.started.clear()
-        pending = self.ui.send("grant", id="e.0")
-        self.assertTrue(await asyncio.to_thread(self.auth.started.wait, WAIT))
-        await self.ui.call("release")
-        self.assertEqual((await asyncio.wait_for(pending, WAIT))["error"], "cancelled")
 
     async def test_eof_cancels_the_dialog(self):
         self.auth.block = True
@@ -375,7 +354,7 @@ class PromptRuleTests(unittest.IsolatedAsyncioTestCase):
         await self.h.unlock(self.ui)
         self.auth.block = True
         self.auth.started.clear()
-        pending = self.ui.send("grant", id="e.0")
+        pending = self.ui.send("delete", id="e.0")
         self.assertTrue(await asyncio.to_thread(self.auth.started.wait, WAIT))
         self.h.reg.lock(4242, "screen-locked")
         self.assertEqual((await asyncio.wait_for(pending, WAIT))["error"], "cancelled")

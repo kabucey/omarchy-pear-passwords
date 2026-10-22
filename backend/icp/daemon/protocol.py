@@ -103,7 +103,6 @@ ALL_OPS = frozenset({"hello"}).union(*ROLE_OPS.values())
 # Ops that raise a polkit dialog, and which action. Everything else never prompts.
 PROMPT_ACTION: dict[str, str] = {
     "unlock": paths.ACTION_UNLOCK,
-    "grant": paths.ACTION_REVEAL,
     "create": paths.ACTION_MANAGE,
     "delete": paths.ACTION_MANAGE,
     "signin": paths.ACTION_MANAGE,

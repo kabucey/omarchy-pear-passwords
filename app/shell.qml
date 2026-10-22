@@ -216,7 +216,7 @@ ShellRoot {
     property var tagDraft: []
     property bool tagBusy: false
     property string tagError: ""
-    // Tags are list metadata; an unfinished tag edit may survive an account approval.
+    // Tags are list metadata; an unfinished tag edit may survive its account closing.
     property var tagKept: null
     property bool panelFocus: false
     property int detailIndex: 0
@@ -607,8 +607,8 @@ ShellRoot {
                 root.grantLeft = Math.max(0, Math.ceil(root.grantExpires - now));
                 if (root.grantLeft === 0) root.grantRanOut();
                 else if (root.grantLeft <= 20 && root.editorOpen && root.editorMode !== "create")
-                    root.editorError = "this account's approval ends in " + root.grantLeft
-                                     + " s — save now, or your edit waits for the next approval";
+                    root.editorError = "this account closes in " + root.grantLeft
+                                     + " s — save now to keep your changes";
             }
             if (root.totpLeft > 0) {
                 root.totpLeft -= 1;
@@ -951,24 +951,19 @@ ShellRoot {
 
     // ---------------------------------------------------------------- the account grant
     // Everything that shows or changes a secret runs through here: if this account is not
-    // open, the daemon raises the second dialog, naming it.
+    // open, the daemon opens its temporary buffer using this window's unlocked session.
     function withGrant(after) {
         if (!root.selected) return;
         if (root.unlocked) { if (after) after(); return; }
         const id = root.selectedId;
         const name = root.selected.primary;
         root.granting = true;
-        root.status = "waiting for approval to open " + name + "…";
+        root.status = "opening " + name + "…";
         root.grantRid = root.send("grant", { id: id }, function (d) {
             root.granting = false;
             root.grantRid = -1;
             if (d.error) {
-                root.status = d.error === "dismissed" || d.error === "cancelled" ? ""
-                            : d.error === "denied" ? "not approved"
-                            : d.error === "no-agent" || d.error === "busy"
-                                ? "the approval dialog isn't available — try again in a moment"
-                            : d.error === "rate-limited" ? "too many tries — wait " + (d.retry_after || 60) + " s"
-                            : d.error === "locked" ? "" : d.error;
+                root.status = d.error === "cancelled" || d.error === "locked" ? "" : d.error;
                 return;
             }
             root.status = "";
@@ -987,7 +982,7 @@ ShellRoot {
         root.forgetSecrets();
     }
 
-    // Approval expiry discards secret edits. Tags are list metadata and may be kept.
+    // Buffer expiry discards secret edits. Tags are list metadata and may be kept.
     function grantRanOut() {
         const kept = root.tagEditing && root.selectedId !== ""
             ? { id: root.selectedId, tags: root.tagDraft.slice(), typed: tagInput.text } : null;
@@ -1119,7 +1114,7 @@ ShellRoot {
     }
     function copyPassword() { root.copyField("password"); }
 
-    // A reply for an account you have since left, or whose approval has since ended, is
+    // A reply for an account you have since left, or whose buffer has since closed, is
     // dropped: a secret is shown only inside its own account's grant.
     function stillOpen(id) { return id === root.selectedId && root.grantId === id; }
 
@@ -1854,7 +1849,7 @@ ShellRoot {
         const s = root.selected;
         if (!s) return [];
         // Apple keeps these read-only (the daemon refuses a `set` on them): no edit is offered,
-        // so no approval dialog is raised for one that cannot happen.
+        // so an account buffer is not opened for an action that cannot happen.
         const readOnly = !!s.recently_deleted || s.kind === "passkey";
         const rows = [{ key: "username", label: s.is_wifi ? "Network" : "Username", value: s.username || "—",
                         quiet: !s.username, actions: [{ key: "username", label: "copy" }] },
@@ -1926,8 +1921,7 @@ ShellRoot {
     }
 
     // Rows Apple keeps read-only (the daemon refuses a `set` on them): Recently Deleted copies
-    // and passkey-only rows. Nothing on them may open an editor, which would raise the
-    // account's approval dialog for an edit that cannot happen.
+    // and passkey-only rows. Nothing on them may open an editor for an edit that cannot happen.
     function selectedReadOnly() {
         const s = root.selected;
         return !!s && (!!s.recently_deleted || s.kind === "passkey");
@@ -2838,8 +2832,7 @@ ShellRoot {
                                             font.pixelSize: Theme.fHeading
                                             elide: Text.ElideRight
                                             HoverHandler { id: hTitle }
-                                            // No rename on a read-only row: its approval
-                                            // dialog would be for an edit that always fails.
+                                            // No rename on a read-only row: the edit always fails.
                                             MouseArea {
                                                 anchors.fill: parent
                                                 enabled: !root.selectedReadOnly()
@@ -3310,7 +3303,7 @@ ShellRoot {
                                 Text {
                                     textFormat: Text.PlainText
                                     visible: !root.historyLoaded && !!root.selected && root.selected.history_count > 0
-                                    text: root.unlocked ? "show" : "unlock"
+                                    text: "show"
                                     readonly property bool keyed: root.panelFocus && !root.historyLoaded
                                                                   && root.detailIndex === root.fieldCount
                                     color: hUnlock.hovered || keyed ? Theme.fg : Theme.dim
