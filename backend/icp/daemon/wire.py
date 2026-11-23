@@ -45,6 +45,7 @@ def meta_to_wire(m, features: dict | None = None) -> dict:
         d["secondary"] = m.username
     return {
         "id": m.id, "title": m.title, "domain": m.domain, "sites": list(m.sites or ()),
+        "own_sites": list(m.sites or ()), "members": [m.id],
         "username": m.username, "nickname": m.nickname, "apple_title": apple,
         "aliases": list(getattr(m, "aliases", ()) or ()),
         "has_totp": bool(m.has_totp), "has_notes": bool(m.has_notes),
@@ -97,12 +98,49 @@ def is_internal(e: dict) -> bool:
     return internal_reason(e) is not None
 
 
+def _merge_group(rows: list[dict]) -> dict:
+    """One row for an account kept as several keychain items (vstore/groups.py). The row is
+    the member that holds the most (code, notes, a name, the newest), so every per-entry action
+    (reveal, copy, code, history, edit) lands on it; `members` lists every id for the daemon to
+    fan out to, and `sites` is every website of every member, the row's own domain excluded."""
+    rows = sorted(rows, key=lambda e: (not e["has_totp"], not e["has_notes"],
+                                       not (e["apple_title"] or e["nickname"]),
+                                       -e["mdat"], e["id"]))
+    row = dict(rows[0])
+    row["members"] = [e["id"] for e in rows]
+    sites: list[str] = []
+    for e in rows:
+        for d in ([e["domain"]] if e is not rows[0] else []) + e["sites"]:
+            if d and d != row["domain"] and d not in sites and d != "AirPort":
+                sites.append(d)
+    row["sites"] = sites
+    row["aliases"] = [a for a in dict.fromkeys(a for e in rows for a in e["aliases"])
+                      if a != row["domain"] and a not in sites]
+    row["has_totp"] = any(e["has_totp"] for e in rows)
+    row["has_notes"] = any(e["has_notes"] for e in rows)
+    row["has_passkey"] = any(e["has_passkey"] for e in rows)
+    row["mdat"] = max(e["mdat"] for e in rows)
+    row["tags"] = list(dict.fromkeys(t for e in rows for t in e["tags"]))
+    row["nickname"] = next((e["nickname"] for e in rows if e["nickname"]), "")
+    row["apple_title"] = next((e["apple_title"] for e in rows if e["apple_title"]), "")
+    return row
+
+
 def entries(metas, show_all: bool = False, features: dict | None = None) -> list[dict]:
     """The sorted wire list. Internal records are left out unless `show_all`, and rows whose
-    feature is off are left out always (visible())."""
-    out = [meta_to_wire(m, features) for m in metas if visible(m, features)]
+    feature is off are left out always (visible()). Items of one account on several websites
+    (Meta.group) are one row."""
+    pairs = [(m, meta_to_wire(m, features)) for m in metas if visible(m, features)]
     if not show_all:
-        out = [e for e in out if not is_internal(e)]
+        pairs = [(m, e) for m, e in pairs if not is_internal(e)]
+    out, groups = [], {}
+    for m, e in pairs:
+        g = getattr(m, "group", "")
+        if g:
+            groups.setdefault(g, []).append(e)
+        else:
+            out.append(e)
+    out += [_merge_group(v) if len(v) > 1 else v[0] for v in groups.values()]
     out.sort(key=lambda e: (e["primary"].lower(), e["secondary"].lower()))
     seen: dict[tuple, int] = {}
     for e in out:

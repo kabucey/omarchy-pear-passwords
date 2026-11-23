@@ -94,6 +94,9 @@ class Meta:
     kind: str = "login"
     has_password: bool = True
     recently_deleted: bool = False
+    # Derived, never stored: the same account on several websites (vstore/groups.py). Every
+    # member of a group carries the same non-empty value; "" for an entry that is alone.
+    group: str = ""
 
 
 @dataclass
@@ -136,6 +139,7 @@ from pathlib import Path as _Path  # noqa: E402
 from .. import paths as _paths  # noqa: E402
 from ..daemon import paths as _system_paths  # noqa: E402
 from . import entries as _entries  # noqa: E402
+from . import groups as _groups  # noqa: E402
 from . import format as _fmt  # noqa: E402
 from . import keys as _keys  # noqa: E402
 from . import meta as _meta  # noqa: E402
@@ -616,7 +620,9 @@ class UserStore:
     def list_meta(self) -> list[Meta]:
         """Every live entry's Meta. Raises StoreLocked."""
         self._need_unlocked()
-        out = [_meta.to_meta(i, r, self._nick.get(i, "")) for i, r in _meta.live(self._doc)]
+        gm = _groups.compute(self._doc, self._nick)
+        out = [_meta.to_meta(i, r, self._nick.get(i, ""), gm.get(i, ""))
+               for i, r in _meta.live(self._doc)]
         out.sort(key=lambda m: (m.title.lower(), m.username.lower(), m.id))
         return out
 
@@ -624,7 +630,21 @@ class UserStore:
     def get_meta(self, id: str) -> Meta:
         """One live entry's Meta. Raises StoreLocked or EntryNotFound."""
         self._need_unlocked()
-        return _meta.to_meta(id, self._live(id), self._nick.get(id, ""))
+        rec = self._live(id)
+        return _meta.to_meta(id, rec, self._nick.get(id, ""),
+                             _groups.compute(self._doc, self._nick).get(id, ""))
+
+    @_serialized
+    def group_members(self, id: str) -> list[str]:
+        """Ids of every live entry in `id`'s group, `id` first; just [id] when it is alone.
+        Raises StoreLocked or EntryNotFound."""
+        self._need_unlocked()
+        self._live(id)
+        gm = _groups.compute(self._doc, self._nick)
+        g = gm.get(id)
+        if not g:
+            return [id]
+        return [id] + sorted(i for i, v in gm.items() if v == g and i != id)
 
     @_serialized
     def set_sync_status(self, *, synced_at: float | None = None,

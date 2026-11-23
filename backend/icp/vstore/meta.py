@@ -92,7 +92,7 @@ def history_count(rec: dict) -> int:
     return len(rec.get("hist") or []) + int(rec.get("apple_n") or 0)
 
 
-def to_meta(id: str, rec: dict, nickname: str = "") -> Meta:
+def to_meta(id: str, rec: dict, nickname: str = "", group: str = "") -> Meta:
     return Meta(id=id, title=rec.get("title", ""), domain=rec.get("domain", ""),
                 sites=list(rec.get("sites") or []), username=rec.get("username", ""),
                 nickname=nickname, has_totp=bool(rec.get("has_totp")),
@@ -103,7 +103,7 @@ def to_meta(id: str, rec: dict, nickname: str = "") -> Meta:
                 has_passkey=bool(rec.get("has_passkey", False)),
                 kind=rec.get("kind") if rec.get("kind") in KINDS else "login",
                 has_password=bool(rec.get("has_password", True)),
-                recently_deleted=bool(rec.get("recently_deleted", False)))
+                recently_deleted=bool(rec.get("recently_deleted", False)), group=group)
 
 
 def live(doc: dict):

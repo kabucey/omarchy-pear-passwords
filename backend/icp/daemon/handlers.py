@@ -231,6 +231,18 @@ def _where_is(metas, entries, id: str) -> str:
             f"visible={wire.visible(m, None)}, internal={wire.is_internal(w)}")
 
 
+async def _members(reg, s, id: str) -> list[str]:
+    """`id` and the other items of the same account on other websites (vstore/groups.py), `id`
+    first. A store without grouping, or an id it does not know, gives just [id]."""
+    fn = getattr(s.store, "group_members", None)
+    if fn is None:
+        return [id]
+    try:
+        return list(await _store(reg, s.uid, fn, id))
+    except vstore.EntryNotFound:
+        return [id]
+
+
 def _notify_list_after(reg, s, watch: str | None = None) -> None:
     """After an edit: send the fresh list as a `synced` event once the reply has gone. `watch`
     is an entry the edit created; where it stands goes to the journal."""
@@ -810,6 +822,12 @@ async def op_set(reg, conn, req):
             synced = False
         if push:
             ctx = UserContext(conn.uid, s.store, reg.anisette_url, None)
+            if "password" in push:
+                # One account on several websites keeps one password: the other items follow
+                # first, so a failure part-way leaves the shown row's own password unchanged.
+                for other in (await _members(reg, s, id))[1:]:
+                    await _apple_call(reg, s, reg.apple.push_set, ctx, other,
+                                      {"password": push["password"]})
             await _apple_call(reg, s, reg.apple.push_set, ctx, id, push)
             if set(clean) == {"nickname"} and clean["nickname"]:
                 # push_set keeps the name locally when Apple had nowhere to put it.
@@ -880,11 +898,15 @@ async def op_delete(reg, conn, req):
     s.busy = "edit"
     try:
         ctx = UserContext(conn.uid, s.store, reg.anisette_url, None)
-        await _apple_call(reg, s, reg.apple.delete, ctx, id)
+        # Deleting an account on several websites deletes every item of it, or the rest would
+        # stay behind as a row of their own.
+        members = await _members(reg, s, id)
+        for mid in members:
+            await _apple_call(reg, s, reg.apple.delete, ctx, mid)
     finally:
         s.busy = None
     g = reg.grants.current(conn.uid)
-    if g is not None and g.id == id:
+    if g is not None and g.id in members:
         reg.release_grant(conn.uid)
     _notify_list_after(reg, s)
     return {"deleted": True}
