@@ -23,8 +23,7 @@ Singleton {
     readonly property color selectedText: Commons.Color.menu.selectedText
     readonly property color hover:        Commons.Color.menu.selectedBackground
     readonly property color panel:        Commons.Color.menu.selectedBackground
-    readonly property color line:         Qt.rgba(Commons.Color.foreground.r,
-                                                  Commons.Color.foreground.g,
+    readonly property color line:         Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g,
                                                   Commons.Color.foreground.b, 0.12)
     readonly property string uiFont:      Style.font.family
     // Omarchy's controls are square. Everything here was rounded 6-9px by hand.
