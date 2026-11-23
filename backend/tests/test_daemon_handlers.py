@@ -607,6 +607,31 @@ class NotesBodyTests(Base):
         r = await self.ui.call("copy", id="e.0", field="notes")
         self.assertEqual((await self.clip_value(r["ticket"]))["value"], "the body")
 
+    async def test_copy_code_is_the_current_code_behind_the_same_grant(self):
+        from icp import totp
+        # No grant: refused exactly like the password.
+        r = await self.ui.call("copy", id="e.0", field="code")
+        self.assertEqual(r["error"], "no-grant")
+        await self.ui.call("grant", id="e.0")
+        now = 1_800_000_010.0                       # pinned: a real clock could straddle a rollover
+        self.h.reg.wall = lambda: now
+        r = await self.ui.call("copy", id="e.0", field="code")
+        red = await self.clip_value(r["ticket"])
+        # The ticket carries the code that is current when the copy is made, as a secret.
+        want = totp.code(b"12345678901234567890", digits=6, period=30, algorithm=0, at=now)
+        self.assertEqual((red["value"], red["sensitive"]), (want, True))
+        # A second copy 31 s later is the next code, not a cached one.
+        self.h.reg.wall = lambda: now + 31
+        await self.ui.call("grant", id="e.0")
+        r = await self.ui.call("copy", id="e.0", field="code")
+        red2 = await self.clip_value(r["ticket"])
+        self.assertEqual(red2["value"], totp.code(b"12345678901234567890", digits=6, period=30,
+                                                   algorithm=0, at=now + 31))
+        # An account without a code refuses.
+        await self.ui.call("grant", id="e.1")
+        r = await self.ui.call("copy", id="e.1", field="code")
+        self.assertEqual((r["error"], r["field"]), ("invalid", "field"))
+
     async def test_grant_fields_follow_the_body_and_has_password(self):
         r = await self.ui.call("grant", id="e.1")
         self.assertEqual(r["fields"], ["password"])            # only a tag line: no notes
