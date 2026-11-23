@@ -158,6 +158,9 @@ ShellRoot {
     property var selected: null
     property string selectedId: ""
     property bool appUnlocked: false
+    // The search field takes the keyboard as soon as the list is usable (first unlock and every
+    // re-unlock), so typing starts a search. Not while a dialog or the sign-in form is up.
+    onAppUnlockedChanged: if (root.appUnlocked) Qt.callLater(root.focusSearch)
     property bool autoAuthTried: false
     property bool authing: false
     property int authRid: -1
@@ -2040,6 +2043,12 @@ ShellRoot {
         root.panelFocus = true;
         root.detailIndex = at === undefined ? 0 : Math.max(0, Math.min(at, root.panelStops() - 1));
         detailKeys.forceActiveFocus();
+    }
+    function focusSearch() {
+        if (!root.appUnlocked || root.editorOpen || root.settingsOpen || root.signinOpen
+                || root.tagEditing || root.renaming || root.confirming || root.deleteConfirm) return;
+        root.panelFocus = false;
+        search.forceActiveFocus();
     }
     function searchFollowsPointer() {
         if (!listHover.hovered || search.activeFocus || !root.appUnlocked) return;
