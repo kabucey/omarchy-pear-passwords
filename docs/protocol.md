@@ -159,7 +159,8 @@ with `state` one of `locked`, `unlocked`, `unavailable` only. `unavailable` cove
  "has_totp":true,"has_notes":false,"mdat":1791450000.0,"history_count":2,
  "primary":"GitHub","secondary":"me@example.com","no_site":false,"is_wifi":false,
  "ambiguous":false,"tags":["work","finance"],"has_passkey":false,"kind":"login",
- "has_password":true,"recently_deleted":false}
+ "has_password":true,"recently_deleted":false,
+ "own_sites":["gist.github.com"],"members":["<opaque>"]}
 ```
 
 - The first twelve fields and the last five are `vstore.Meta`. `id` is opaque to clients: at

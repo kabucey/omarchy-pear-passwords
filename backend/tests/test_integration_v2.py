@@ -48,7 +48,7 @@ class VersionTests(unittest.TestCase):
             manifest = json.load(f)["version"]
         with open(os.path.join(root, "backend", "pyproject.toml"), encoding="utf-8") as f:
             pyproject = re.search(r'^version = "([^"]+)"', f.read(), re.M).group(1)
-        self.assertEqual({handlers.VERSION, manifest, pyproject}, {"2.0.3"})
+        self.assertEqual({handlers.VERSION, manifest, pyproject}, {"2.0.4"})
 
 
 class NoLeaseCodeTests(unittest.TestCase):

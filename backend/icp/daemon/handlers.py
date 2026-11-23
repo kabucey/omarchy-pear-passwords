@@ -39,7 +39,7 @@ from .tickets import TicketError
 
 logger = logging.getLogger(__name__)
 
-VERSION = "2.0.3"
+VERSION = "2.0.4"
 
 _HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
                       r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
