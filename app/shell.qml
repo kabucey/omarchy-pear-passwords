@@ -1895,7 +1895,8 @@ ShellRoot {
         if (s.has_totp)
             rows.push({ key: "totp", label: "Code",
                         value: root.totpCode ? root.totpCode : "show code",
-                        quiet: !root.totpCode, actions: [{ key: "edittotp", label: "edit" }] });
+                        quiet: !root.totpCode,
+                        actions: [{ key: "edittotp", label: "edit" }, { key: "copycode", label: "copy" }] });
         else
             rows.push({ key: "edittotp", label: "Code", value: "Set up verification code",
                         quiet: true, actions: [] });
@@ -1952,7 +1953,9 @@ ShellRoot {
             });
         else if (key === "website") root.openDomain(root.selected.domain);
         else if (key.indexOf("open:") === 0) root.openDomain(root.allSites()[parseInt(key.slice(5))]);
-        else if (key === "totp") root.loadTotp();
+        else if (key === "copycode") root.copyField("code");
+        // Enter on a shown code copies it, like the password row; a hidden one is shown first.
+        else if (key === "totp") { if (root.totpCode) root.copyField("code"); else root.loadTotp(); }
         else if (key === "editsites") root.withGrant(function () { root.openEditor("sites"); });
         else if (key === "edittotp") root.withGrant(function () { root.openEditor("totp"); });
         else if (key === "notes")

@@ -127,6 +127,17 @@ class SourceTests(unittest.TestCase):
         self.assertIn('clipComponent.createObject(root, { ticket: d.ticket, words: "Selection", running: true });',
                       function_text("copyText"))
 
+    def test_the_code_row_copies_through_the_same_path_as_the_password(self):
+        # The row once offered only "edit": the daemon's copy of field "code" was unreachable.
+        rows = function_text("fieldRows")
+        self.assertIn('{ key: "copycode", label: "copy" }', rows)
+        act = function_text("fieldAction")
+        self.assertIn('key === "copycode") root.copyField("code")', act)
+        self.assertIn('if (root.totpCode) root.copyField("code"); else root.loadTotp();', act)
+        self.assertIn('field === "code" ? "Code"', function_text("clipWords"))
+        # copyField asks for the account's grant for a code, as for a password.
+        self.assertIn('field === "code"', function_text("copyField"))
+
     def test_copied_is_said_only_after_offered(self):
         # The VM: the toast said "copied" while pear-exec had refused the clip role and nothing
         # was on the clipboard. Only pear-clip's {"event":"offered"} line may say it.
