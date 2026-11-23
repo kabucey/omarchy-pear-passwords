@@ -176,6 +176,17 @@ with `state` one of `locked`, `unlocked`, `unavailable` only. `unavailable` cove
   feature is on (`features`, section 6.10), and `has_passkey` is false while `passkeys` is
   off. Both are read-only: `set` on one is `invalid` with `field:"id"`, and autofill never
   offers one.
+- **One account on several websites is one row.** Apple keeps one keychain item per website
+  with the same account and password and no field linking them, so the daemon groups live
+  logins with the same username and the same password (compared by pwmac inside the daemon:
+  nothing is opened and no password or MAC is sent), unless each carries a different Apple title
+  or nickname. Recently Deleted copies, passkey-only rows, Wi-Fi items and entries without a
+  username are never grouped. The row is the member that holds a code, then notes, then a name,
+  then the newest; its `id` is that member's, so `reveal`, `copy`, `totp`, `history` and `set`
+  act on it. `members` is every id of the row (just `[id]` for a single item). `domain` is the
+  row's own site and `sites` every other website of every member (their domains and their
+  stored extra sites); `own_sites` is only what the row's own item stores, the part `set`
+  `sites` replaces. `has_totp`, `has_notes` and `tags` cover all members.
 - `primary`, `secondary`, `no_site`, `is_wifi`, `ambiguous` are display fields the daemon
   derives exactly as 1.3.2's `app-list` did (nickname, then Apple's title, then the derived
   title; Wi-Fi items are domain `AirPort`; `ambiguous` when two rows would look identical).
@@ -446,7 +457,10 @@ fields. The text goes through pear-clip like a `copy`, never onto the persistent
   `title`, `notes`, `sites`, `totp`, `tags` (written as the notes' last line); a password is
   required unless `generate:{}`.
   Reply: `{"rid":11,"id":"<new id>"}`.
-- `delete` needs `.manage` and tier 1. Reply: `{"rid":12,"deleted":true}`.
+- `delete` needs `.manage` and tier 1. For a row with several `members` it deletes every
+  member item. A `set` with `password` is pushed to every member too (the other members
+  first), so the row stays one account. Notes, tags, sites, nickname and code are the row's own
+  item's. Reply: `{"rid":12,"deleted":true}`.
 - `totp-preview` needs tier 1, no grant, reads nothing from the store: parses the setup text
   and replies `{"rid":13,"code":"123456","seconds":17,"issuer":"...","account":"..."}` or
   `invalid`.

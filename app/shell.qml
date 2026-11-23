@@ -1588,7 +1588,7 @@ ShellRoot {
     function openEditor(mode) {
         root.editorMode = mode; root.editorError = ""; root.totpPreview = ({});
         root.editorBusy = false; root.createMore = false; root.createGenerate = false;
-        edArea.text = mode === "sites" ? (root.selected ? (root.selected.sites || []).join("\n") : "")
+        edArea.text = mode === "sites" ? (root.selected ? (root.selected.own_sites || root.selected.sites || []).join("\n") : "")
                     : mode === "notes" ? root.notesText : "";
         edSetup.text = "";
         if (mode === "create") {
@@ -2606,6 +2606,16 @@ ShellRoot {
                                             font.pixelSize: Theme.fSmall
                                             elide: Text.ElideRight
                                         }
+                                    }
+
+                                    // One account on several websites is one row: how many more.
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        visible: !modelData.is_wifi && (modelData.sites || []).length > 0
+                                        text: "+" + (modelData.sites || []).length
+                                        color: Theme.dim
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: Theme.fSmall
                                     }
 
                                     Text {
