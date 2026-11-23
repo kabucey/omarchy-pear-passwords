@@ -25,7 +25,20 @@ Singleton {
     readonly property color panel:        Commons.Color.menu.selectedBackground
     readonly property color line:         Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g,
                                                   Commons.Color.foreground.b, 0.12)
+    // Surfaces, in the shell kit's own state alphas (Style.normalFillAlpha and friends), so a
+    // card here reads like an Omarchy control rather than a colour picked for this window.
+    readonly property color surface:      tint(Commons.Color.foreground, Style.normalFillAlpha)
+    readonly property color surfaceHover: tint(Commons.Color.foreground, Style.hoverFillAlpha)
+    readonly property color border:       tint(Commons.Color.foreground, 0.14)
+    readonly property color borderStrong: tint(Commons.Color.foreground, Style.normalBorderAlpha)
+    readonly property color accentSoft:   tint(Commons.Color.accent, 0.16)
     readonly property string uiFont:      Style.font.family
+    // Nerd Font glyphs. The family is a system font (fonts.conf reads only /usr/share/fonts),
+    // and the `monospace` alias falls back to it for any codepoint the UI font lacks.
+    readonly property string iconFont:    "JetBrainsMono Nerd Font"
+    readonly property int gutter:         Style.spacing.panelPadding + 6
+
+    function tint(c, a) { return Qt.rgba(c.r, c.g, c.b, a); }
     // Omarchy's controls are square. Everything here was rounded 6-9px by hand.
     readonly property int radius:         Style.cornerRadius
 
@@ -38,4 +51,8 @@ Singleton {
     readonly property int fSmall:     Math.round(Style.font.bodySmall * appScale)
     readonly property int fBody:      Math.round(Style.font.body      * appScale)
     readonly property int fHeading:   Math.round(Style.font.heading   * appScale)
+    readonly property int fTitle:     Math.round(Style.font.display   * appScale * 0.85)
+    // Section labels: the shell's PanelHero/PanelSectionHeader caption, uppercase and tracked.
+    readonly property int fLabel:     Math.round(Style.font.caption   * appScale * 0.95)
+    readonly property real labelTracking: 1.2
 }

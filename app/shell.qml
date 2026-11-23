@@ -62,12 +62,12 @@ ShellRoot {
     readonly property bool windowFloating: root.settings.window_mode !== "regular"
     // A window floated after it maps keeps whatever size the tiler gave it, which differs by
     // layout, workspace and neighbours. So a floating Pear is always put at the same size
-    // (1100x720, or 90% of the screen when that is smaller) before it is centred.
+    // (1200x780, or 90% of the screen when that is smaller) before it is centred.
     readonly property string windowRulesLua: "_G.__pear_passwords_float = "
         + (root.windowFloating ? "true " : "false ")
         + "hl.window_rule({ match = { class = [[^org\\.quickshell$]], "
         + "title = [[^Pear Passwords$]] }, no_screen_share = true }) "
-        + "local sz = function(w) local mw, mh = 1100, 720 "
+        + "local sz = function(w) local mw, mh = 1200, 780 "
         + "local ok, m = pcall(function() return w.monitor end) "
         + "if ok and type(m) == [[table]] and m.width and m.height then "
         + "local s = m.scale or 1 local W, H = m.width / s, m.height / s "
@@ -1859,7 +1859,7 @@ ShellRoot {
         const parts = [];
         if (root.selected.mdat) parts.push("changed " + root.ago(root.selected.mdat));
         if (root.unlocked) parts.push(root.grantSingleUse ? "open for one use" : "open " + root.clock(root.grantLeft));
-        return parts.join("   ·   ");
+        return parts.join("  ·  ");
     }
 
     function fieldRows() {
@@ -1920,6 +1920,22 @@ ShellRoot {
                     quiet: !tags.length || root.tagEditing, chips: root.tagEditing ? [] : tags,
                     actions: tags.length && !readOnly ? [{ key: "edittags", label: "edit" }] : [] });
         return readOnly ? root.withoutEdits(rows) : rows;
+    }
+    // Row actions are icon buttons (the shell's square icon-button shape); the word they used
+    // to be is the tooltip, so the meaning is one hover away and the value keeps the room.
+    function actionGlyph(label) {
+        if (label === "copy") return "\uf0c5";
+        if (label === "view") return "\uf06e";
+        if (label === "hide") return "\uf070";
+        if (label === "change") return "\uf084";
+        if (label.indexOf("open") === 0) return "\uf08e";
+        if (label === "edit") return "\uf040";
+        return label;
+    }
+    function actionTip(label) {
+        if (label.indexOf("open") === 0) return "Open in browser";
+        if (label === "change") return "Change password";
+        return label.charAt(0).toUpperCase() + label.slice(1);
     }
     function withoutEdits(rows) {
         for (let i = 0; i < rows.length; i++) {
@@ -2130,11 +2146,21 @@ ShellRoot {
         const letters = s.replace(/[^A-Za-z0-9]/g, "");
         return (letters.substring(0, 2) || "?").toUpperCase();
     }
-    function chipColor(e) {
+    // Monogram tiles take their hue from the name (so a row is findable by colour) and their
+    // saturation and lightness from the theme, so they sit in any palette, light or dark: a
+    // tinted fill and border with the letters in the same hue, like the kit's selected state.
+    function chipHue(e) {
         let h = 0;
         const s = e.primary || "";
         for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffffff;
-        return Qt.hsla((h % 360) / 360, 0.32, 0.42, 1.0);
+        return (h % 360) / 360;
+    }
+    function chipSat() { return Math.max(0.35, Math.min(0.6, Theme.accent.hslSaturation)); }
+    function chipColor(e) { return Qt.hsla(root.chipHue(e), root.chipSat(), Theme.accent.hslLightness, 0.26); }
+    function chipEdge(e)  { return Qt.hsla(root.chipHue(e), root.chipSat(), Theme.accent.hslLightness, 0.55); }
+    function chipInk(e) {
+        return Qt.hsla(root.chipHue(e), root.chipSat(),
+                       (Theme.fg.hslLightness + Theme.accent.hslLightness) / 2, 1.0);
     }
     function ago(unix) {
         if (!unix) return "";
@@ -2146,13 +2172,47 @@ ShellRoot {
     }
     function isRecent(unix) { return unix && (Date.now() / 1000 - unix) < 30 * 86400; }
 
+    // A shortcut hint: the key in a hairline box, then what it does. Used by the status bar.
+    component KeyHint: Row {
+        id: kh
+        property string keys: ""
+        property string label: ""
+        spacing: 6
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(height, khKey.implicitWidth + 10)
+            height: khKey.implicitHeight + 4
+            radius: Math.min(4, Theme.radius)
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.border
+            Text {
+                id: khKey
+                textFormat: Text.PlainText
+                anchors.centerIn: parent
+                text: kh.keys
+                color: Theme.fg
+                font.family: Theme.uiFont
+                font.pixelSize: Theme.fCaption
+            }
+        }
+        Text {
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: kh.label
+            color: Theme.dim
+            font.family: Theme.uiFont
+            font.pixelSize: Theme.fCaption
+        }
+    }
+
     FloatingWindow {
         id: win
         title: "Pear Passwords"
         // The same size every launch (Hyprland's float rule above applies it to the
         // floating window); the minimum keeps a tiled or resized window usable.
-        implicitWidth: 1100
-        implicitHeight: 720
+        implicitWidth: 1200
+        implicitHeight: 780
         minimumSize: Qt.size(820, 560)
         color: Theme.bg
         // Hidden until the rules are in and the daemon has answered (or a moment has passed),
@@ -2191,6 +2251,9 @@ ShellRoot {
                     root.doReveal(); ev.accepted = true;
                 } else if (ev.key === Qt.Key_L && ev.modifiers & Qt.ControlModifier) {
                     root.lockNow(); ev.accepted = true;
+                } else if (ev.key === Qt.Key_N && ev.modifiers & Qt.ControlModifier) {
+                    if (root.appUnlocked && root.signedIn && !root.editorOpen) root.openEditor("create");
+                    ev.accepted = true;
                 } else if (root.typeToSearch(ev)) {
                     ev.accepted = true;
                 }
@@ -2293,35 +2356,70 @@ ShellRoot {
 
                         Rectangle {
                             Layout.fillWidth: true
-                            implicitHeight: 58
+                            implicitHeight: 64
                             // Above the list, so the search's drop-down draws over it.
                             z: 2
-                            color: Theme.panel
-                            // Plain text in the corner, no box: a search that looks like a form
-                            // field makes the whole window read as a dialog.
-                            // New entry: a word in the corner, like the search it sits beside.
-                            Text {
-                                textFormat: Text.PlainText
+                            color: Theme.bg
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.line }
+
+                            // The search box, drawn the way the shell's TextField draws one:
+                            // a faint fill and a hairline that takes the accent while focused.
+                            Rectangle {
+                                id: searchBox
+                                anchors.left: parent.left
+                                anchors.right: newButton.visible ? newButton.left : parent.right
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: newButton.visible ? 8 : 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                height: 38
+                                radius: Theme.radius
+                                color: search.activeFocus ? Theme.surfaceHover : Theme.surface
+                                border.width: 1
+                                border.color: search.activeFocus ? Theme.tint(Theme.accent, 0.7) : Theme.border
+                                Behavior on border.color { ColorAnimation { duration: 120 } }
+                                Text {
+                                    textFormat: Text.PlainText
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: ""
+                                    color: search.activeFocus ? Theme.accent : Theme.dim
+                                    font.family: Theme.iconFont
+                                    font.pixelSize: Theme.fSmall
+                                }
+                            }
+
+                            // New entry: a compact bordered button beside the search, the shell's
+                            // icon-button shape. Ctrl+N does the same.
+                            Rectangle {
                                 id: newButton
                                 anchors.right: parent.right
-                                anchors.rightMargin: 16
+                                anchors.rightMargin: 12
                                 anchors.verticalCenter: parent.verticalCenter
                                 visible: root.appUnlocked && root.signedIn
-                                text: "+ New"
-                                color: hNew.hovered ? Theme.fg : Theme.dim
-                                font.family: Theme.uiFont
-                                font.pixelSize: Theme.fBody
+                                width: 38; height: 38
+                                radius: Theme.radius
+                                color: hNew.hovered ? Theme.accentSoft : Theme.surface
+                                border.width: 1
+                                border.color: hNew.hovered ? Theme.tint(Theme.accent, 0.7) : Theme.border
+                                Text {
+                                    textFormat: Text.PlainText
+                                    anchors.centerIn: parent
+                                    text: ""
+                                    color: hNew.hovered ? Theme.accent : Theme.fg
+                                    font.family: Theme.iconFont
+                                    font.pixelSize: Theme.fSmall
+                                }
                                 HoverHandler { id: hNew; cursorShape: Qt.PointingHandCursor }
                                 TapHandler { onTapped: root.openEditor("create") }
+                                O.PanelToolTip { visible: hNew.hovered; text: "New password  (Ctrl+N)" }
                             }
                             // Hover it (or Alt+Down, or a leading '#') for the categories and
                             // tags; the chosen one sits before the query as a chip
                             // (CategorySearch.qml). Down/Up/Enter/Tab keep their list meanings.
                             CategorySearch {
                                 id: search
-                                anchors.fill: parent
-                                anchors.leftMargin: 14
-                                anchors.rightMargin: newButton.visible ? newButton.width + 28 : 14
+                                anchors.fill: searchBox
+                                leadingInset: 30
                                 enabled: root.appUnlocked
                                 opacity: root.appUnlocked ? 1 : 0.6
                                 // Nothing drops down behind a sheet (their dim takes no hover).
@@ -2559,25 +2657,49 @@ ShellRoot {
                             currentIndex: root.cursor
                             ScrollBar.vertical: AppScrollBar {}
 
-                            delegate: Rectangle {
+                            delegate: Item {
+                                id: lrow
                                 required property var modelData
                                 required property int index
+                                readonly property bool current: index === root.cursor
                                 width: list.width
                                 height: 58
-                                color: index === root.cursor ? Theme.selected
-                                     : hov.hovered ? Qt.darker(Theme.hover, 1.3) : "transparent"
+
+                                // The row's fill sits inset from the column edges, the way the
+                                // shell's menus draw a selected row, with the accent as a bar.
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 6
+                                    anchors.rightMargin: 6
+                                    anchors.topMargin: 2
+                                    anchors.bottomMargin: 2
+                                    radius: Theme.radius
+                                    color: lrow.current ? Theme.selected
+                                         : hov.hovered ? Theme.surface : "transparent"
+                                    Rectangle {
+                                        visible: lrow.current
+                                        width: 3
+                                        anchors.left: parent.left
+                                        anchors.top: parent.top
+                                        anchors.bottom: parent.bottom
+                                        anchors.topMargin: 10
+                                        anchors.bottomMargin: 10
+                                        radius: 1
+                                        color: Theme.accent
+                                    }
+                                }
 
                                 HoverHandler { id: hov }
                                 TapHandler {
-                                    onTapped: { root.leavePanel(); root.cursor = index; root.select(modelData); }
+                                    onTapped: { root.leavePanel(); root.cursor = lrow.index; root.select(lrow.modelData); }
                                     onDoubleTapped: root.copyPassword()
                                 }
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: 10
-                                    anchors.rightMargin: 10
-                                    spacing: 10
+                                    anchors.leftMargin: 18
+                                    anchors.rightMargin: 18
+                                    spacing: 12
 
                                     // identity chip: deterministic from the name, never a
                                     // fetched favicon - that would tell every one of these
@@ -2586,13 +2708,15 @@ ShellRoot {
                                         Layout.preferredWidth: 34
                                         Layout.preferredHeight: 34
                                         radius: Theme.radius
-                                        color: root.chipColor(modelData)
+                                        color: root.chipColor(lrow.modelData)
+                                        border.width: 1
+                                        border.color: root.chipEdge(lrow.modelData)
                                         Text {
                                             textFormat: Text.PlainText
                                             anchors.centerIn: parent
-                                            text: root.monogram(modelData)
-                                            color: "#ffffff"
-                                            font.family: Theme.uiFont
+                                            text: lrow.modelData.is_wifi ? "\uf1eb" : root.monogram(lrow.modelData)
+                                            color: root.chipInk(lrow.modelData)
+                                            font.family: lrow.modelData.is_wifi ? Theme.iconFont : Theme.uiFont
                                             font.pixelSize: Theme.fSmall
                                             font.bold: true
                                         }
@@ -2600,22 +2724,24 @@ ShellRoot {
 
                                     ColumnLayout {
                                         Layout.fillWidth: true
-                                        spacing: 1
+                                        spacing: 2
                                         RowLayout {
                                             Layout.fillWidth: true
                                             spacing: 6
                                             Text {
                                                 textFormat: Text.PlainText
                                                 Layout.fillWidth: true
-                                                text: modelData.primary
-                                                color: Theme.fg
+                                                text: lrow.modelData.primary
+                                                color: lrow.current ? Theme.selectedText : Theme.fg
                                                 font.family: Theme.uiFont
                                                 font.pixelSize: Theme.fBody
+                                                font.bold: lrow.current
                                                 elide: Text.ElideRight
                                             }
+                                            // Changed in the last few days.
                                             Rectangle {
-                                                visible: root.isRecent(modelData.mdat)
-                                                width: 6; height: 6; radius: Theme.radius
+                                                visible: root.isRecent(lrow.modelData.mdat)
+                                                width: 6; height: 6; radius: 3
                                                 color: Theme.accent
                                             }
                                         }
@@ -2624,12 +2750,12 @@ ShellRoot {
                                             Layout.fillWidth: true
                                             visible: text.length > 0
                                             // The account first; "no website" only when there is nothing else to say.
-                                            text: modelData.is_wifi ? "Wi-Fi network"
-                                                : modelData.no_site && !modelData.secondary
-                                                ? ((modelData.sites || []).length ? modelData.sites[0] : "no website")
-                                                : modelData.ambiguous
-                                                    ? modelData.secondary + " · " + root.ago(modelData.mdat)
-                                                    : modelData.secondary
+                                            text: lrow.modelData.is_wifi ? "Wi-Fi network"
+                                                : lrow.modelData.no_site && !lrow.modelData.secondary
+                                                ? ((lrow.modelData.sites || []).length ? lrow.modelData.sites[0] : "no website")
+                                                : lrow.modelData.ambiguous
+                                                    ? lrow.modelData.secondary + " · " + root.ago(lrow.modelData.mdat)
+                                                    : lrow.modelData.secondary
                                             color: Theme.dim
                                             font.family: Theme.uiFont
                                             font.pixelSize: Theme.fSmall
@@ -2637,22 +2763,40 @@ ShellRoot {
                                         }
                                     }
 
-                                    // One account on several websites is one row: how many more.
-                                    Text {
-                                        textFormat: Text.PlainText
-                                        visible: !modelData.is_wifi && (modelData.sites || []).length > 0
-                                        text: "+" + (modelData.sites || []).length
-                                        color: Theme.dim
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: Theme.fSmall
-                                    }
-
-                                    Text {
-                                        textFormat: Text.PlainText
-                                        visible: modelData.has_totp
-                                        text: "⧗"
-                                        color: Theme.dim
-                                        font.pixelSize: Theme.fBody
+                                    // What else the account holds, as quiet glyphs: more websites
+                                    // (one account on several sites is one row) and a code.
+                                    Row {
+                                        spacing: 10
+                                        Layout.alignment: Qt.AlignVCenter
+                                        Row {
+                                            spacing: 4
+                                            visible: !lrow.modelData.is_wifi && (lrow.modelData.sites || []).length > 0
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: "\uf0ac"
+                                                color: Theme.dim
+                                                font.family: Theme.iconFont
+                                                font.pixelSize: Theme.fCaption
+                                            }
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: "+" + (lrow.modelData.sites || []).length
+                                                color: Theme.dim
+                                                font.family: Theme.uiFont
+                                                font.pixelSize: Theme.fCaption
+                                            }
+                                        }
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            visible: lrow.modelData.has_totp
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: "\uf017"
+                                            color: Theme.dim
+                                            font.family: Theme.iconFont
+                                            font.pixelSize: Theme.fSmall
+                                        }
                                     }
                                 }
                             }
@@ -2738,16 +2882,34 @@ ShellRoot {
                             width: Math.min(parent.width - 80, 420)
                             visible: !root.appUnlocked
                             spacing: 14
-                            // Everything here is greyed except the one thing you can do. A locked
-                            // screen shouldn't shout its own state louder than the way out of it.
+                            // Quiet except the one thing you can do. A locked screen shouldn't
+                            // shout its own state louder than the way out of it.
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.bottomMargin: 6
+                                width: 64; height: 64
+                                radius: Theme.radius
+                                color: Theme.surface
+                                border.width: 1
+                                border.color: Theme.border
+                                Text {
+                                    textFormat: Text.PlainText
+                                    anchors.centerIn: parent
+                                    text: root.screen === "no-agent" ? "\uf071" : "\uf023"
+                                    color: Theme.accent
+                                    font.family: Theme.iconFont
+                                    font.pixelSize: Theme.fHeading + 6
+                                }
+                            }
                             Text {
                                 textFormat: Text.PlainText
                                 Layout.alignment: Qt.AlignHCenter
                                 text: root.screen === "no-agent" ? "The unlock dialog isn't available"
                                                                  : "Pear Passwords is locked"
-                                color: Theme.dim
+                                color: Theme.fg
                                 font.family: Theme.uiFont
                                 font.pixelSize: Theme.fHeading
+                                font.bold: true
                             }
                             Text {
                                 textFormat: Text.PlainText
@@ -2770,6 +2932,7 @@ ShellRoot {
                             AppButton {
                                 Layout.alignment: Qt.AlignHCenter
                                 Layout.topMargin: 6
+                                active: true
                                 text: root.authing ? "Retry" : root.screen === "no-agent" ? "Try again" : "Unlock"
                                 onClicked: root.authing ? root.retryAuth() : root.authenticate()
                             }
@@ -2824,10 +2987,10 @@ ShellRoot {
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: 28
-                            anchors.rightMargin: 28
-                            anchors.topMargin: 26
-                            anchors.bottomMargin: 16
+                            anchors.leftMargin: 32
+                            anchors.rightMargin: 32
+                            anchors.topMargin: 28
+                            anchors.bottomMargin: 18
                             spacing: 0
                             visible: !!root.selected
 
@@ -2838,18 +3001,20 @@ ShellRoot {
                                 spacing: 14
 
                                 Rectangle {
-                                    Layout.preferredWidth: 42
-                                    Layout.preferredHeight: 42
-                                    Layout.alignment: Qt.AlignTop
+                                    Layout.preferredWidth: 52
+                                    Layout.preferredHeight: 52
+                                    Layout.alignment: Qt.AlignVCenter
                                     radius: Theme.radius
                                     color: root.selected ? root.chipColor(root.selected) : "transparent"
+                                    border.width: 1
+                                    border.color: root.selected ? root.chipEdge(root.selected) : "transparent"
                                     Text {
                                         textFormat: Text.PlainText
                                         anchors.centerIn: parent
-                                        text: root.selected ? root.monogram(root.selected) : ""
-                                        color: "#ffffff"
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: Theme.fBody
+                                        text: !root.selected ? "" : root.selected.is_wifi ? "\uf1eb" : root.monogram(root.selected)
+                                        color: root.selected ? root.chipInk(root.selected) : Theme.fg
+                                        font.family: root.selected && root.selected.is_wifi ? Theme.iconFont : Theme.uiFont
+                                        font.pixelSize: Theme.fHeading
                                         font.bold: true
                                     }
                                 }
@@ -2868,7 +3033,8 @@ ShellRoot {
                                             text: root.selected ? root.selected.primary : ""
                                             color: Theme.fg
                                             font.family: Theme.uiFont
-                                            font.pixelSize: Theme.fHeading
+                                            font.pixelSize: Theme.fTitle
+                                            font.bold: true
                                             elide: Text.ElideRight
                                             HoverHandler { id: hTitle }
                                             // No rename on a read-only row: the edit always fails.
@@ -2888,9 +3054,9 @@ ShellRoot {
                                         Text {
                                             textFormat: Text.PlainText
                                             visible: !root.renaming
-                                            text: "rename"
+                                            text: "\uf040"
                                             color: Theme.dim
-                                            font.family: Theme.uiFont
+                                            font.family: Theme.iconFont
                                             font.pixelSize: Theme.fSmall
                                             opacity: hTitle.hovered && !root.selectedReadOnly() ? 1 : 0
                                         }
@@ -2930,19 +3096,58 @@ ShellRoot {
                                     Text {
                                         textFormat: Text.PlainText
                                         Layout.fillWidth: true
-                                        text: root.metaLine()
+                                        text: root.metaLine().toUpperCase()
                                         visible: text.length > 0
                                         color: Theme.dim
                                         font.family: Theme.uiFont
-                                        font.pixelSize: Theme.fSmall
+                                        font.pixelSize: Theme.fLabel
+                                        font.bold: true
+                                        font.letterSpacing: Theme.labelTracking
                                         elide: Text.ElideRight
                                     }
                                 }
+
+                                // Delete: a quiet icon at the header's edge; it asks first, below.
+                                Rectangle {
+                                    visible: root.canDelete && !root.tagEditing && !root.deleteConfirm
+                                    Layout.alignment: Qt.AlignVCenter
+                                    width: 34; height: 34
+                                    radius: Theme.radius
+                                    color: hDelete.hovered ? Theme.tint(Theme.danger, 0.14) : "transparent"
+                                    border.width: 1
+                                    border.color: hDelete.hovered ? Theme.tint(Theme.danger, 0.7) : Theme.border
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        anchors.centerIn: parent
+                                        text: "\uf1f8"
+                                        color: hDelete.hovered ? Theme.danger : Theme.dim
+                                        font.family: Theme.iconFont
+                                        font.pixelSize: Theme.fSmall
+                                    }
+                                    HoverHandler { id: hDelete; cursorShape: Qt.PointingHandCursor }
+                                    TapHandler { onTapped: root.deleteConfirm = true }
+                                    O.PanelToolTip { visible: hDelete.hovered; text: "Delete…" }
+                                }
                             }
 
-                            Item { Layout.preferredHeight: 26 }
+                            Item { Layout.preferredHeight: 22 }
 
-                            // ---- fields: flat rows, the value is the action
+                            // ---- fields: one bordered card, a hairline between rows, the label
+                            // as a small-caps caption the way the shell's panels label a section.
+                            // The value is the row's main action; the rest sit at the right edge,
+                            // always there (quiet) so copy and edit are never a hunt.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: fieldCol.implicitHeight
+                                radius: Theme.radius
+                                color: Theme.surface
+                                border.width: 1
+                                border.color: Theme.border
+                            ColumnLayout {
+                                id: fieldCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                spacing: 0
                             Repeater {
                                 model: root.fieldRows()
                                 delegate: Item {
@@ -2950,25 +3155,36 @@ ShellRoot {
                                     required property var modelData
                                     required property int index
                                     readonly property bool keyed: root.fieldFocused(index)
+                                    readonly property bool isCode: modelData.key === "totp" && !!root.totpCode
                                     Layout.fillWidth: true
                                     // Grows with the tag chips when they wrap onto more lines.
-                                    implicitHeight: chipFlow.visible ? Math.max(48, chipFlow.implicitHeight + 22) : 48
+                                    implicitHeight: chipFlow.visible ? Math.max(48, chipFlow.implicitHeight + 22)
+                                                  : frow.isCode ? 56 : 48
+
+                                    // A hairline above every row but the first.
+                                    Rectangle {
+                                        visible: frow.index > 0
+                                        anchors.top: parent.top
+                                        anchors.left: parent.left; anchors.right: parent.right
+                                        anchors.leftMargin: 16; anchors.rightMargin: 16
+                                        height: 1
+                                        color: Theme.line
+                                    }
 
                                     HoverHandler { id: hRow }
                                     Rectangle {
                                         anchors.fill: parent
-                                        anchors.leftMargin: -12
-                                        anchors.rightMargin: -12
+                                        anchors.margins: 1
                                         radius: Theme.radius
-                                        color: hRow.hovered || frow.keyed ? Theme.selected : "transparent"
+                                        color: frow.keyed ? Theme.selected : hRow.hovered ? Theme.surfaceHover : "transparent"
                                         // Keyboard focus gets a mark of its own, so it stays findable
                                         // while the pointer is lighting up some other row.
                                         Rectangle {
                                             visible: frow.keyed
-                                            x: 0; width: 2; radius: 1
+                                            x: 0; width: 3; radius: 1
                                             anchors.top: parent.top; anchors.bottom: parent.bottom
-                                            anchors.topMargin: 10; anchors.bottomMargin: 10
-                                            color: Theme.fg
+                                            anchors.topMargin: 12; anchors.bottomMargin: 12
+                                            color: Theme.accent
                                         }
                                     }
                                     MouseArea {
@@ -2978,14 +3194,18 @@ ShellRoot {
                                     }
                                     RowLayout {
                                         anchors.fill: parent
-                                        spacing: 18
+                                        anchors.leftMargin: 18
+                                        anchors.rightMargin: 10
+                                        spacing: 12
                                         Text {
                                             textFormat: Text.PlainText
-                                            Layout.preferredWidth: 88
-                                            text: frow.modelData.label
+                                            Layout.preferredWidth: 92
+                                            text: frow.modelData.label.toUpperCase()
                                             color: Theme.dim
                                             font.family: Theme.uiFont
-                                            font.pixelSize: Theme.fSmall
+                                            font.pixelSize: Theme.fLabel
+                                            font.bold: true
+                                            font.letterSpacing: Theme.labelTracking
                                         }
                                         Text {
                                             id: fieldValue
@@ -2995,11 +3215,17 @@ ShellRoot {
                                             textFormat: Text.PlainText
                                             Layout.fillWidth: true
                                             visible: !(frow.modelData.chips && frow.modelData.chips.length)
-                                            text: frow.modelData.value
-                                            color: frow.modelData.quiet ? Theme.dim : Theme.fg
+                                            // A code reads in two groups of three, like Apple shows it.
+                                            text: frow.isCode && root.totpCode.length === 6
+                                                  ? root.totpCode.slice(0, 3) + " " + root.totpCode.slice(3)
+                                                  : frow.modelData.value
+                                            color: frow.isCode ? Theme.accent : frow.modelData.quiet ? Theme.dim : Theme.fg
                                             font.family: Theme.uiFont
-                                            font.pixelSize: Theme.fBody
-                                            elide: Text.ElideRight
+                                            font.pixelSize: frow.isCode ? Theme.fHeading : Theme.fBody
+                                            font.bold: frow.isCode
+                                            font.letterSpacing: frow.isCode ? 1 : 0
+                                            elide: frow.isCode ? Text.ElideNone : Text.ElideRight
+                                            Layout.minimumWidth: frow.isCode ? implicitWidth : 0
                                         }
                                         // Tags as chips, the way the search field shows one. They wrap
                                         // onto more lines (up to 16 tags): none is ever cut off.
@@ -3014,8 +3240,10 @@ ShellRoot {
                                                     required property var modelData
                                                     width: tagChip.implicitWidth + 16
                                                     height: tagChip.implicitHeight + 6
-                                                    radius: 9
-                                                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
+                                                    radius: Theme.radius
+                                                    color: Theme.accentSoft
+                                                    border.width: 1
+                                                    border.color: Theme.tint(Theme.accent, 0.35)
                                                     Text {
                                                         id: tagChip
                                                         textFormat: Text.PlainText
@@ -3028,29 +3256,59 @@ ShellRoot {
                                                 }
                                             }
                                         }
+                                        // The code's seconds left, as a draining bar and a number.
+                                        Row {
+                                            visible: frow.isCode
+                                            spacing: 8
+                                            Layout.alignment: Qt.AlignVCenter
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: root.totpLeft + "s"
+                                                color: root.totpLeft <= 5 ? Theme.danger : Theme.dim
+                                                font.family: Theme.uiFont
+                                                font.pixelSize: Theme.fCaption
+                                            }
+                                        }
                                         // Secondary actions: declared on top, so a click on one
                                         // is taken here and never reaches the row's own action.
-                                        Repeater {
-                                            model: frow.modelData.actions
-                                            delegate: Text {
-                                                textFormat: Text.PlainText
-                                                required property var modelData
-                                                text: modelData.label
-                                                color: hAct.hovered ? Theme.fg : Theme.dim
-                                                font.family: Theme.uiFont
-                                                font.pixelSize: Theme.fSmall
-                                                opacity: hRow.hovered || frow.keyed || modelData.sticky ? 1 : 0
-                                                HoverHandler { id: hAct }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    anchors.margins: -8
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.fieldAction(modelData.key)
+                                        Row {
+                                            spacing: 4
+                                            Layout.alignment: Qt.AlignVCenter
+                                            Repeater {
+                                                model: frow.modelData.actions
+                                                delegate: Rectangle {
+                                                    required property var modelData
+                                                    readonly property bool hot: hAct.hovered
+                                                    readonly property bool lit: hRow.hovered || frow.keyed || !!modelData.sticky
+                                                    width: 32; height: 32
+                                                    radius: Theme.radius
+                                                    color: hot ? Theme.accentSoft : lit ? Theme.surface : "transparent"
+                                                    border.width: 1
+                                                    border.color: hot ? Theme.tint(Theme.accent, 0.7)
+                                                                : lit ? Theme.border : "transparent"
+                                                    Text {
+                                                        textFormat: Text.PlainText
+                                                        anchors.centerIn: parent
+                                                        text: root.actionGlyph(modelData.label)
+                                                        color: parent.hot ? Theme.accent : parent.lit ? Theme.fg : Theme.dim
+                                                        font.family: Theme.iconFont
+                                                        font.pixelSize: Theme.fSmall
+                                                    }
+                                                    O.PanelToolTip { visible: hAct.hovered; text: root.actionTip(modelData.label) }
+                                                    HoverHandler { id: hAct; cursorShape: Qt.PointingHandCursor }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: root.fieldAction(modelData.key)
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
+                            }
                             }
 
                             // other sites this login is offered on, as plain links
@@ -3120,8 +3378,10 @@ ShellRoot {
                                                 required property int index
                                                 width: draftRow.width + 16
                                                 height: 26
-                                                radius: 9
-                                                color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
+                                                radius: Theme.radius
+                                                color: Theme.accentSoft
+                                                border.width: 1
+                                                border.color: Theme.tint(Theme.accent, 0.35)
                                                 Row {
                                                     id: draftRow
                                                     x: 8
@@ -3327,16 +3587,18 @@ ShellRoot {
                             RowLayout {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: false
-                                Layout.topMargin: 30
-                                visible: !root.tagEditing
+                                Layout.topMargin: 28
+                                Layout.leftMargin: 2
+                                visible: !root.tagEditing && !root.deleteConfirm
                                 spacing: 10
                                 Text {
                                     textFormat: Text.PlainText
-                                    text: "History"
+                                    text: "PASSWORD HISTORY"
                                     color: Theme.dim
                                     font.family: Theme.uiFont
-                                    font.pixelSize: Theme.fSmall
-                                    font.letterSpacing: 0.6
+                                    font.pixelSize: Theme.fLabel
+                                    font.bold: true
+                                    font.letterSpacing: Theme.labelTracking
                                 }
                                 Item { Layout.fillWidth: true }
                                 Text {
@@ -3363,7 +3625,8 @@ ShellRoot {
                                 textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 Layout.topMargin: 10
-                                visible: !!root.selected && !root.tagEditing && (root.selected.history_count === 0
+                                Layout.leftMargin: 2
+                                visible: !!root.selected && !root.tagEditing && !root.deleteConfirm && (root.selected.history_count === 0
                                          || (root.historyLoaded && root.historyRows.length === 0))
                                 text: "No changes recorded yet."
                                 color: Theme.dim
@@ -3373,7 +3636,7 @@ ShellRoot {
 
                             Item {
                                 Layout.fillHeight: true
-                                visible: !(root.historyLoaded && root.historyRows.length > 0) || root.tagEditing
+                                visible: !(root.historyLoaded && root.historyRows.length > 0) || root.tagEditing || root.deleteConfirm
                             }
 
                             // The list is widened 12px each side and its text inset by the same,
@@ -3384,7 +3647,7 @@ ShellRoot {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 Layout.topMargin: 6
-                                visible: root.historyLoaded && root.historyRows.length > 0 && !root.tagEditing
+                                visible: root.historyLoaded && root.historyRows.length > 0 && !root.tagEditing && !root.deleteConfirm
                             ListView {
                                 id: historyList
                                 anchors.fill: parent
@@ -3402,7 +3665,7 @@ ShellRoot {
                                     required property int index
                                     readonly property bool keyed: root.fieldFocused(root.fieldCount + index)
                                     width: ListView.view ? ListView.view.width : 0
-                                    height: 52
+                                    height: 40
                                     HoverHandler { id: hH }
                                     Rectangle {
                                         anchors.fill: parent
@@ -3421,17 +3684,17 @@ ShellRoot {
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: root.toggleHistory(hrow.index)
                                     }
-                                    ColumnLayout {
+                                    RowLayout {
                                         anchors.left: parent.left
                                         anchors.right: parent.right
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
+                                        anchors.leftMargin: 14
+                                        anchors.rightMargin: 14
                                         anchors.verticalCenter: parent.verticalCenter
-                                        spacing: 3
+                                        spacing: 16
                                         Text {
                                             textFormat: Text.PlainText
-                                            text: Qt.formatDateTime(new Date(hrow.modelData.date), "d MMM yyyy") + "   "
-                                                  + (hrow.modelData.source === "local" ? "seen changing here" : "from Apple")
+                                            Layout.preferredWidth: 104
+                                            text: Qt.formatDateTime(new Date(hrow.modelData.date), "d MMM yyyy")
                                             color: Theme.dim
                                             font.family: Theme.uiFont
                                             font.pixelSize: Theme.fSmall
@@ -3449,6 +3712,13 @@ ShellRoot {
                                             font.pixelSize: Theme.fBody
                                             elide: Text.ElideRight
                                         }
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            text: hrow.modelData.source === "local" ? "seen changing here" : "from Apple"
+                                            color: Theme.dim
+                                            font.family: Theme.uiFont
+                                            font.pixelSize: Theme.fCaption
+                                        }
                                     }
                                 }
                             }
@@ -3457,19 +3727,9 @@ ShellRoot {
                             // ---- delete: the whole consequence in words, then the dialog
                             ColumnLayout {
                                 Layout.fillWidth: true
-                                Layout.topMargin: 14
+                                Layout.topMargin: 18
                                 spacing: 10
-                                visible: root.canDelete && !root.tagEditing
-                                Text {
-                                    textFormat: Text.PlainText
-                                    visible: !root.deleteConfirm
-                                    text: "Delete…"
-                                    color: hDelete.hovered ? Theme.danger : Theme.dim
-                                    font.family: Theme.uiFont
-                                    font.pixelSize: Theme.fSmall
-                                    HoverHandler { id: hDelete; cursorShape: Qt.PointingHandCursor }
-                                    TapHandler { onTapped: root.deleteConfirm = true }
-                                }
+                                visible: root.canDelete && !root.tagEditing && root.deleteConfirm
                                 Text {
                                     textFormat: Text.PlainText
                                     visible: root.deleteConfirm
@@ -3505,13 +3765,15 @@ ShellRoot {
                 Rectangle {
                     id: statusBar
                     Layout.fillWidth: true
-                    implicitHeight: 24
-                    color: root.flash ? Theme.hover : Theme.panel
+                    implicitHeight: 34
+                    color: root.flash ? Theme.accentSoft : Theme.bg
+                    Behavior on color { ColorAnimation { duration: 160 } }
+                    Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.line }
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 12
-                        spacing: 14
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 16
                         Text {
                             textFormat: Text.PlainText
                             Layout.fillWidth: true
@@ -3600,16 +3862,15 @@ ShellRoot {
                             HoverHandler { id: hLockNow; cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.lockNow() }
                         }
-                        Text {
-                            textFormat: Text.PlainText
+                        Row {
                             visible: root.entries.length > 0 && !root.unlocked
-                            text: root.panelFocus
-                                ? "↑↓ move   ⏎ copy / open   ␣ show   esc list"
-                                : "↑↓ move   ⏎ copy   ⇥ details   esc back"
                             opacity: root.appUnlocked ? 1 : 0.45
-                            color: Theme.dim
-                            font.family: Theme.uiFont
-                            font.pixelSize: Theme.fSmall
+                            spacing: 14
+                            KeyHint { keys: "↑↓"; label: "move" }
+                            KeyHint { keys: "⏎"; label: root.panelFocus ? "copy / open" : "copy" }
+                            KeyHint { visible: root.panelFocus; keys: "␣"; label: "show" }
+                            KeyHint { visible: !root.panelFocus; keys: "⇥"; label: "details" }
+                            KeyHint { keys: "esc"; label: root.panelFocus ? "list" : "back" }
                         }
                     }
                 }
@@ -3730,12 +3991,21 @@ ShellRoot {
                              && (ev.modifiers & Qt.ControlModifier)) { root.editorSave(); ev.accepted = true; }
                 }
 
+                // Scrolls when the window is shorter than the form (a new password with every
+                // field, at the minimum window size), so the buttons are never cut off.
+                Flickable {
+                    id: edFlick
+                    anchors.fill: parent
+                    contentWidth: width
+                    contentHeight: edSheet.implicitHeight + 60
+                    boundsBehavior: Flickable.StopAtBounds
+                    clip: true
+                    ScrollBar.vertical: AppScrollBar {}
                 ColumnLayout {
                     id: edSheet
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.margins: 30
+                    x: 30
+                    y: 30
+                    width: edFlick.width - 60
                     spacing: 0
 
                     Text {
@@ -4149,6 +4419,7 @@ ShellRoot {
                             onClicked: root.editorSave()
                         }
                     }
+                }
                 }
             }
         }

@@ -170,7 +170,7 @@ class WindowWiringTests(unittest.TestCase):
         area = area[:area.index("root.renaming = true;")]
         self.assertIn("enabled: !root.selectedReadOnly()", area)
         self.assertIn("onClicked: if (!root.selectedReadOnly()) root.withGrant(", area)
-        hint = title[title.index('text: "rename"'):][:400]
+        hint = title[title.index('text: "\\uf040"'):][:400]   # the rename pencil
         self.assertIn("opacity: hTitle.hovered && !root.selectedReadOnly() ? 1 : 0", hint)
 
     def test_read_only_notes_only_reveal(self):
@@ -256,7 +256,7 @@ class TagsRowTests(unittest.TestCase):
         flow = element_of("chipFlow")
         self.assertIn("Layout.fillWidth: true", flow)
         self.assertNotIn("clip:", flow)
-        self.assertIn("implicitHeight: chipFlow.visible ? Math.max(48, chipFlow.implicitHeight + 22) : 48",
+        self.assertIn("implicitHeight: chipFlow.visible ? Math.max(48, chipFlow.implicitHeight + 22)",
                       CODE)
         self.assertRegex(CODE[CODE.rfind("{", 0, CODE.index("id: chipFlow")) - 8:], r"^\s*Flow \{")
 

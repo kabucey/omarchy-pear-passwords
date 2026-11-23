@@ -61,7 +61,9 @@ TextField {
         return Math.max(120, w.height - top - catSearch.bottomReserve - 8);
     }
 
-    leftPadding: chip.visible ? catSearch.padding + chip.width + 8 : catSearch.padding
+    // Room before the chip for a leading glyph the caller draws (the search icon).
+    property real leadingInset: 0
+    leftPadding: catSearch.leadingInset + (chip.visible ? catSearch.padding + chip.width + 8 : catSearch.padding)
 
     function activeRow() {
         for (let i = 0; i < catSearch.catRows.length; i++) {
@@ -225,12 +227,14 @@ TextField {
     Rectangle {
         id: chip
         visible: catSearch.tag !== null
-        x: catSearch.padding
+        x: catSearch.leadingInset + catSearch.padding
         anchors.verticalCenter: parent.verticalCenter
         width: chipRow.width + 16
         height: chipLabel.implicitHeight + 6
-        radius: 9
-        color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
+        radius: Theme.radius
+        color: Theme.accentSoft
+        border.width: 1
+        border.color: Theme.tint(Theme.accent, 0.35)
         Row {
             id: chipRow
             x: 8
@@ -401,17 +405,22 @@ TextField {
                         x: 8
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 10
-                        // Apple's round tile badge: the category's colour, a white glyph.
+                        // The category's glyph in a small tile drawn in the theme's colours
+                        // (accent for a category, a hairline for a tag), not Apple's fixed
+                        // per-category colours, which fight every Omarchy palette.
                         Rectangle {
+                            readonly property bool isCat: crow.modelData.kind !== "tag"
                             anchors.verticalCenter: parent.verticalCenter
-                            width: 22; height: 22; radius: 11
-                            color: crow.modelData.tint || Theme.selected
+                            width: 24; height: 24; radius: Theme.radius
+                            color: isCat ? Theme.accentSoft : Theme.surface
+                            border.width: 1
+                            border.color: isCat ? Theme.tint(Theme.accent, 0.4) : Theme.border
                             opacity: crow.modelData.count > 0 || crow.active ? 1 : 0.45
                             Text {
                                 textFormat: Text.PlainText
                                 anchors.centerIn: parent
                                 text: crow.modelData.icon || ""
-                                color: crow.modelData.tint ? "#ffffff" : Theme.fg
+                                color: parent.isCat ? Theme.accent : Theme.dim
                                 font.family: Theme.uiFont
                                 font.pixelSize: Theme.fSmall
                                 font.bold: crow.modelData.kind === "tag"
