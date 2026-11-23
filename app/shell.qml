@@ -58,13 +58,23 @@ ShellRoot {
     // every launch before the window maps. The handler is registered once per Hyprland
     // session; a regular window also undoes an older session's float rule. enable/disable,
     // never set/unset: Hyprland reads those as a toggle, so "regular" floated every newly
-    // tiled window. v4 because a v3 handler (the toggling one) may still be registered.
+    // tiled window. v5 because an older handler (the toggling one, or one that never sized the window) may still be registered.
     readonly property bool windowFloating: root.settings.window_mode !== "regular"
+    // A window floated after it maps keeps whatever size the tiler gave it, which differs by
+    // layout, workspace and neighbours. So a floating Pear is always put at the same size
+    // (1100x720, or 90% of the screen when that is smaller) before it is centred.
     readonly property string windowRulesLua: "_G.__pear_passwords_float = "
         + (root.windowFloating ? "true " : "false ")
         + "hl.window_rule({ match = { class = [[^org\\.quickshell$]], "
         + "title = [[^Pear Passwords$]] }, no_screen_share = true }) "
-        + "if not _G.__pear_passwords_rules_v4 then "
+        + "local sz = function(w) local mw, mh = 1100, 720 "
+        + "local ok, m = pcall(function() return w.monitor end) "
+        + "if ok and type(m) == [[table]] and m.width and m.height then "
+        + "mw = math.min(mw, math.floor(m.width * 0.9)) mh = math.min(mh, math.floor(m.height * 0.9)) end "
+        + "hl.dispatch(hl.dsp.window.resize({ x = mw, y = mh, relative = false, window = w })) "
+        + "hl.dispatch(hl.dsp.window.center({ window = w })) end "
+        + "_G.__pear_passwords_size = sz "
+        + "if not _G.__pear_passwords_rules_v5 then "
         + "local m = { class = [[^org\\.quickshell$]], title = [[^Pear Passwords$]] } "
         + "hl.window_rule({ match = m, tag = [[-default-opacity]] }) "
         + "hl.window_rule({ match = m, opacity = [[1 override 1 override]] }) "
@@ -74,14 +84,14 @@ ShellRoot {
         + "hl.dispatch(hl.dsp.window.float({ action = [[disable]], window = w })) "
         + "else "
         + "hl.dispatch(hl.dsp.window.float({ action = [[enable]], window = w })) "
-        + "hl.dispatch(hl.dsp.window.center({ window = w })) "
+        + "_G.__pear_passwords_size(w) "
         + "end end) "
-        + "_G.__pear_passwords_rules_v4 = true end"
+        + "_G.__pear_passwords_rules_v5 = true end"
     // The same choice for the window that is already open, when it changes in Settings.
     readonly property string windowModeLua: "_G.__pear_passwords_float = "
         + (root.windowFloating
            ? "true hl.dispatch(hl.dsp.window.float({ action = [[enable]], window = [[title:^Pear Passwords$]] })) "
-             + "hl.dispatch(hl.dsp.window.center({ window = [[title:^Pear Passwords$]] }))"
+             + "if _G.__pear_passwords_size then _G.__pear_passwords_size([[title:^Pear Passwords$]]) end"
            : "false hl.dispatch(hl.dsp.window.float({ action = [[disable]], window = [[title:^Pear Passwords$]] }))")
     readonly property string focusLua: "hl.dsp.focus({ window = \"title:^Pear Passwords$\" })"
     // What a site may look like before it is handed to Hyprland to open: a lowercase host of
@@ -2123,8 +2133,11 @@ ShellRoot {
     FloatingWindow {
         id: win
         title: "Pear Passwords"
-        implicitWidth: 960
-        implicitHeight: 640
+        // The same size every launch (Hyprland's float rule above applies it to the
+        // floating window); the minimum keeps a tiled or resized window usable.
+        implicitWidth: 1100
+        implicitHeight: 720
+        minimumSize: Qt.size(820, 560)
         color: Theme.bg
         // Hidden until the rules are in and the daemon has answered (or a moment has passed),
         // so a second launch that only raises the first window never flashes on screen.
