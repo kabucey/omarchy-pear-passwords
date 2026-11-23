@@ -38,6 +38,10 @@ CUTTLEFISH_SERVICE = "Cuttlefish"
 
 ENV_PRODUCTION = 1
 DB_PRIVATE = 1
+# Protobuf enum for header field 23. Only 1 (private) is confirmed. The shared value is NOT
+# known: CKDatabaseScope in the public API is public=1/private=2/shared=3, which does not match
+# this wire enum, so the probe tries each candidate. See docs/protocol.md "Shared groups".
+DB_SHARED_CANDIDATES = (2, 3)
 ISOLATION_ZONE = 1
 IDENTIFIER_TYPE_DEVICE = 2
 OP_TYPE_FUNCTION_INVOKE = 1101
@@ -258,13 +262,17 @@ class CloudKitTransport:
         return h
 
     def _perform(self, url: str, op_type: int, request_field: int, request_bytes: bytes,
-                 *, bundle: str, routing_hint: str | None = None) -> CloudKitResult:
+                 *, bundle: str, routing_hint: str | None = None,
+                 database: int = DB_PRIVATE, scope: str = "Private") -> CloudKitResult:
         """LIVE. Build + gzip + POST a RequestOperation, parse + check the ResponseOperation."""
-        header = build_header(self.device, container=self.container, bundle=bundle)
+        header = build_header(self.device, container=self.container, bundle=bundle,
+                              database=database)
         req = build_request_operation_generic(header, op_type, request_field, request_bytes)
         body = gzip.compress(delimit(req))
+        headers = self._headers(bundle, routing_hint)
+        headers["x-cloudkit-databasescope"] = scope
         try:
-            resp = self.http.post(url, headers=self._headers(bundle, routing_hint),
+            resp = self.http.post(url, headers=headers,
                                   data=body, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as e:
             raise CloudKitError(f"network error talking to {url}: {e}") from e
@@ -301,4 +309,15 @@ class CloudKitTransport:
         result = self._perform(
             CKDATABASE_SYNC_URL, ckks.OP_TYPE_RECORD_RETRIEVE_CHANGES,
             ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=SECURITYD_BUNDLE)
+        return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""
+
+    def probe_shared_records(self, zone_request_bytes: bytes, database: int) -> bytes:
+        """LIVE, READ-ONLY, DIAGNOSTIC. RecordRetrieveChanges against the SHARED database scope.
+
+        Never used by sync. `database` is a candidate wire value (DB_SHARED_CANDIDATES) because
+        the real one is unconfirmed. The only operation sent is a fetch."""
+        result = self._perform(
+            CKDATABASE_SYNC_URL, ckks.OP_TYPE_RECORD_RETRIEVE_CHANGES,
+            ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=SECURITYD_BUNDLE,
+            database=database, scope="Shared")
         return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""

@@ -10,7 +10,7 @@ import logging
 import time
 
 from . import items as sync_items, keys as ok
-from .. import const
+from .. import const, diag
 from ..escrow import bottle as escrow, srp as escrow_srp
 from ..transport import ckks, cloudkit
 from ..keychain import pipeline
@@ -169,6 +169,11 @@ def _is_absent_optional_zone(error: cloudkit.CloudKitError) -> bool:
     ))
 
 
+def _err_summary(e: Exception) -> dict:
+    return {"type": type(e).__name__, "code": getattr(e, "code", None),
+            "description": (getattr(e, "description", None) or str(e))[:120]}
+
+
 def parse_viable_bottles(raw: bytes) -> list[dict]:
     """-> [{id, otbottle bytes}]."""
     out = []
@@ -297,6 +302,30 @@ class OctagonClient:
             raise OctagonError(
                 f"keychain sync incomplete; refusing to update the vault ({details})")
         return grouped
+
+    def probe_sharing(self, candidate_zones=ckks.SHARING_PROBE_ZONES) -> dict:
+        """READ-ONLY diagnostic for shared password groups; returns a redacted report and never
+        feeds the vault. Item data is not decoded: only record types, counts, field names and
+        error codes are kept. Shared-group zone names are not public (KCSharing is closed
+        source), so this can only try guessed names; the report shows what Apple answered."""
+        report: dict = {"private_zones": {}, "shared": {}}
+        for zone in candidate_zones:
+            zid = ckks.record_zone_identifier(zone, self.user_id)
+            req = ckks.build_retrieve_changes_request(zid)
+            try:
+                page = ckks.parse_retrieve_changes_response(self.transport.fetch_records(req))
+                report["private_zones"][zone] = ckks.summarize_records(page["records"])
+            except Exception as e:  # noqa: BLE001 - diagnostics must not raise
+                report["private_zones"][zone] = {"error": _err_summary(e)}
+            for db in cloudkit.DB_SHARED_CANDIDATES:
+                try:
+                    raw = self.transport.probe_shared_records(req, db)
+                    page = ckks.parse_retrieve_changes_response(raw)
+                    report["shared"][f"{zone}@db{db}"] = ckks.summarize_records(page["records"])
+                except Exception as e:  # noqa: BLE001
+                    report["shared"][f"{zone}@db{db}"] = {"error": _err_summary(e)}
+        diag.dump(logging.getLogger(__name__), "sharing probe", report)
+        return report
 
     def _recover_sponsor(self, escrow_host: str, email: str, pet: str, passcode: bytes,
                          chosen: dict | None = None, *, confirm_irreversible: bool):
