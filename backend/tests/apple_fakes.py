@@ -22,6 +22,7 @@ class FakeStore:
         self.sync_status = {"synced_at": None, "needs_login": needs_login}
         self.unseal_count = 0
         self.applied = []          # (items, deleted) per apply_sync call
+        self.shared_applied = []   # items per apply_shared_sync call
         self.secrets_set = []      # (id, Secrets) per set_secrets call
         self.session_saves = 0
 
@@ -81,6 +82,19 @@ class FakeStore:
         for d in deleted:
             self.metas.pop(d, None)
         return {"added": added, "changed": len(items) - added, "deleted": len(deleted),
+                "unchanged": 0}
+
+    def apply_shared_sync(self, items) -> dict:
+        items = list(items)
+        self.shared_applied.append(items)
+        added = sum(1 for i in items if i.id not in self.metas)
+        keep = {i.id for i in items}
+        gone = [i for i, m in self.metas.items() if m.shared_group and i not in keep] if items else []
+        for i in items:
+            self.metas[i.id] = i.meta
+        for g in gone:
+            self.metas.pop(g)
+        return {"added": added, "changed": len(items) - added, "deleted": len(gone),
                 "unchanged": 0}
 
     def set_secrets(self, id: str, s) -> None:

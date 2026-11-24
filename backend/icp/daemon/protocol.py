@@ -210,6 +210,8 @@ ERRORS: dict[str, str] = {
     "network": "iCloud could not be reached",
     "apple": "iCloud refused the change; text is in 'detail'",
     "invalid": "a field value failed validation; the field is named in 'field'",
+    "shared-read-only": "the entry belongs to a shared group and is read-only here: no edit, "
+                        "rename, tag change or delete",
     # migration
     "wrong-passphrase": "the old passphrase or PEEKed key does not open check.enc",
     "mismatch": "the converted store did not verify; nothing was kept",

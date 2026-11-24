@@ -217,6 +217,9 @@ class OctagonClient:
             name=getattr(device, "name", "") or "Mac")
         self.transport = cloudkit.CloudKitTransport(self.ck_token, self.user_id, dev, anisette)
         self.failed_zones: list[str] = []
+        # What the last sync_and_decrypt learned about the shared groups (octagon.shared), or
+        # None when it did not look. Held in memory only; the caller applies it and drops it.
+        self.shared = None
 
     def fetch_changes(self, sync_token: str | None = None) -> dict:
         result = self.transport.invoke("fetchChanges", cf.encode_fetch_changes_request(sync_token))
@@ -505,4 +508,39 @@ class OctagonClient:
         records.setdefault("synckey", []).extend(view_synckeys)
         items = decrypt_to_sync_items(records, self.record["octagon"], tlks, nicknames)
         self.item_shape = getattr(items, "item_shape", None)
+        self.shared = self._collect_shared(records, tlks)
+        del records
         return items
+
+    def _collect_shared(self, records: dict, tlks: dict):
+        """The Apple Passwords shared groups you own, as octagon.shared.SharedSync. Takes the
+        Protected Cloud Storage keys out of the records this sync already fetched (no second
+        keychain fetch), then sends only op 203, 201 and 213 to the shared-keychain container
+        (icp.sharing.fetch). It never raises: anything that goes wrong makes `complete` False,
+        and the caller then leaves every shared entry exactly as it is. The keys are cleared
+        before this returns."""
+        from . import shared
+        from ..sharing import diagnose as sharing_diag
+
+        pcs_keys: dict = {}
+        try:
+            oct_state = self.record["octagon"]
+            plain = pipeline.unwrap_tlkshares(
+                records.get("tlkshare", []), oct_state["peer_id"],
+                load_peer_keys(oct_state).encryption.private_key)
+            pcs_keys, key_stats = sharing_diag.pcs_keys_from_records(records, {**plain, **tlks})
+            kc_user = cloudkit.ck_app_init(cloudkit.KCSHARING_CONTAINER,
+                                           cloudkit.KCSHARING_BUNDLE, self.mme_dsid,
+                                           self.mme_token, self.anisette)
+            transport = cloudkit.CloudKitTransport(self.ck_token, kc_user, self.transport.device,
+                                                   self.anisette,
+                                                   container=cloudkit.KCSHARING_CONTAINER)
+            res = shared.collect(transport, kc_user, pcs_keys)
+            res.stats["pcs_keys"] = key_stats.get("pcs_keys", 0)
+        except Exception as e:  # noqa: BLE001 - the own keychain's sync must not depend on this
+            res = shared.SharedSync(complete=False, stats={"failed": {type(e).__name__: 1}})
+        finally:
+            pcs_keys.clear()
+        logging.getLogger(__name__).info("shared groups: complete=%s %s", res.complete,
+                                         res.stats)
+        return res

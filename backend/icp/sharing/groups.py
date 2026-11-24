@@ -19,7 +19,24 @@ from ..transport import ckks, cloudkit
 from . import pcs
 
 MAX_RECORD_PAGES = 200
+MAX_ZONE_PAGES = 25
 STATUS_MORE, STATUS_DONE = 1, 3          # op 213, as OctagonClient.sync_keychain reads them
+
+
+def list_zones(transport) -> list[dict]:
+    """Op 203: the zones of the private database that are groups (name `group-...`), minus the
+    deleted ones. Pages until the server says it is done."""
+    zones, continuation = [], None
+    for _ in range(MAX_ZONE_PAGES):
+        page = ckks.parse_zone_changes_response(transport.probe_zone_changes(
+            continuation, bundle=cloudkit.KCSHARING_BUNDLE, database=cloudkit.DB_PRIVATE,
+            scope="Private"))
+        zones.extend(page["zones"])
+        continuation = page.get("continuation_token")
+        if page.get("status") == 2 or not continuation:
+            break
+    deleted = {z["name"] for z in zones if z.get("change_type") == 2}
+    return [z for z in zones if z["name"].startswith("group-") and z["name"] not in deleted]
 
 
 def fetch_zone_protection(transport, zone_raw: bytes, *, database: int, scope: str) -> dict:

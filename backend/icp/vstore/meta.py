@@ -6,7 +6,8 @@ Plaintext shape (under K_meta, written whole on every change - 554 entries is ~2
      "entries": {"<id>": {
          "title", "domain", "sites", "username", "apple_title", "aliases",
          "has_totp", "has_notes", "mdat", "tags", "has_passkey", "kind",
-         "has_password", "recently_deleted",           -> vstore.Meta (nickname comes from
+         "has_password", "recently_deleted",
+         "shared_group",                              -> vstore.Meta (nickname comes from
                                                           nicknames.v2, history_count is
                                                           derived)
          "v":      version of entries/<id>.box,
@@ -19,7 +20,7 @@ Plaintext shape (under K_meta, written whole on every change - 554 entries is ~2
 A tombstoned entry keeps its record, box and history: if iCloud brings the account back, its
 history and nickname are still there.
 
-The last five Meta fields came after the first meta.v2 files were written. A record without
+The last six Meta fields came after the first meta.v2 files were written. A record without
 them reads as the defaults below (FORMAT stays 2), and compares equal to them, so loading an
 older file changes nothing until the next sync fills them in.
 """
@@ -32,10 +33,10 @@ from . import Meta, SealError
 FORMAT = 2
 _META_FIELDS = ("title", "domain", "sites", "username", "apple_title", "aliases", "has_totp",
                 "has_notes", "mdat", "tags", "has_passkey", "kind", "has_password",
-                "recently_deleted")
+                "recently_deleted", "shared_group")
 # What a record written before a field existed holds for it.
 DEFAULTS = {"tags": [], "has_passkey": False, "kind": "login", "has_password": True,
-            "recently_deleted": False}
+            "recently_deleted": False, "shared_group": ""}
 KINDS = ("login", "passkey")
 
 
@@ -74,6 +75,7 @@ def fields_from(m: Meta) -> dict:
         "kind": m.kind if m.kind in KINDS else "login",
         "has_password": bool(m.has_password),
         "recently_deleted": bool(m.recently_deleted),
+        "shared_group": str(m.shared_group or ""),
     }
 
 
@@ -103,7 +105,8 @@ def to_meta(id: str, rec: dict, nickname: str = "", group: str = "") -> Meta:
                 has_passkey=bool(rec.get("has_passkey", False)),
                 kind=rec.get("kind") if rec.get("kind") in KINDS else "login",
                 has_password=bool(rec.get("has_password", True)),
-                recently_deleted=bool(rec.get("recently_deleted", False)), group=group)
+                recently_deleted=bool(rec.get("recently_deleted", False)),
+                shared_group=str(rec.get("shared_group") or ""), group=group)
 
 
 def live(doc: dict):

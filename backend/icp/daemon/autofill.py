@@ -230,6 +230,8 @@ def match_rank(host: str, meta: "Meta") -> int | None:
         return None
     if getattr(meta, "recently_deleted", False) or getattr(meta, "kind", "login") == "passkey":
         return None
+    if isinstance(getattr(meta, "shared_group", ""), str) and meta.shared_group:
+        return None       # shared-group entries are for the window to view and copy, not to fill
     best = None
     for value in [meta.domain, *(meta.sites or ())]:
         stored = _entry_host(value)

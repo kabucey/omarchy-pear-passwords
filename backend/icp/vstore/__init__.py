@@ -75,6 +75,7 @@ class Meta:
     "passkey" for a row that is only a passkey (`has_password` false), `has_passkey` marks a
     login that also has one, and `recently_deleted` an item in Apple's Recently Deleted (an
     access group ending in -recently-deleted): read-only, and never a live entry.
+    `shared_group` names the shared group of an entry that belongs to one (read-only too).
     """
 
     id: str
@@ -94,6 +95,9 @@ class Meta:
     kind: str = "login"
     has_password: bool = True
     recently_deleted: bool = False
+    # The name of the Apple Passwords shared group this entry comes from, "" for an entry of
+    # the person's own keychain. A shared entry is read-only here (docs/protocol.md 3.1).
+    shared_group: str = ""
     # Derived, never stored: the same account on several websites (vstore/groups.py). Every
     # member of a group carries the same non-empty value; "" for an entry that is alone.
     group: str = ""
@@ -145,6 +149,7 @@ from . import keys as _keys  # noqa: E402
 from . import meta as _meta  # noqa: E402
 from . import seal as _seal  # noqa: E402
 from . import session_store as _ss  # noqa: E402
+from . import ids as _ids  # noqa: E402
 from .ids import check_id as _check_id  # noqa: E402
 
 _log = _logging.getLogger(__name__)
@@ -719,18 +724,66 @@ class UserStore:
         the old box to history and seal the new secrets; if only non-password secrets changed,
         re-seal the box (the old one is not history). Ids in `deleted` are tombstoned in meta.
         Returns {"added": n, "changed": n, "deleted": n, "unchanged": n}.
-        Must never unseal SK_secret (unseal_count stays unchanged)."""
+        Must never unseal SK_secret (unseal_count stays unchanged).
+
+        This is the person's own keychain. An item of a shared group is refused (it goes
+        through apply_shared_sync), and a shared entry's id in `deleted` is ignored: the own
+        keychain's fetch says nothing about the shared groups, so it can never remove one."""
         self._need_unlocked()
         items = list(items)
         for it in items:
-            if not isinstance(it, SyncItem) or not isinstance(it.meta, Meta):
-                raise ValueError("apply_sync takes SyncItems")
-            _check_id(it.id)
-            if it.meta.id != it.id:
-                raise ValueError("SyncItem.meta.id differs from SyncItem.id")
-            _entries.check_secrets(it.secrets)
-        gone = set(deleted or ())
+            self._check_item(it)
+            if _ids.is_shared_id(it.id) or it.meta.shared_group:
+                raise ValueError("apply_sync takes the person's own entries")
+        gone = {i for i in (deleted or ()) if not _ids.is_shared_id(i)}
         counts = {"added": 0, "changed": 0, "deleted": 0, "unchanged": 0}
+        self._upsert(items, counts)
+        self._tombstone(gone, counts)
+        self._write_meta()
+        return counts
+
+    @_serialized
+    def apply_shared_sync(self, items: Iterable[SyncItem]) -> dict:
+        """Make the shared entries exactly `items`, the result of one COMPLETE fetch of every
+        shared group. The caller calls this only when nothing in the fetch failed; a partial
+        fetch must not reach here, because every shared entry not in `items` is tombstoned.
+        An empty `items` removes nothing (an empty answer is not evidence that the groups are
+        gone). Only entries in the shared id namespace are ever touched; the person's own
+        entries are never upserted or tombstoned here. Same counts as apply_sync."""
+        self._need_unlocked()
+        items = list(items)
+        for it in items:
+            self._check_item(it)
+            if not _ids.is_shared_id(it.id) or not it.meta.shared_group:
+                raise ValueError("apply_shared_sync takes shared entries only")
+        counts = {"added": 0, "changed": 0, "deleted": 0, "unchanged": 0}
+        self._upsert(items, counts)
+        if items:
+            keep = {it.id for it in items}
+            self._tombstone({i for i, r in _meta.live(self._doc)
+                             if _ids.is_shared_id(i) and i not in keep}, counts)
+        self._write_meta()
+        return counts
+
+    @staticmethod
+    def _check_item(it) -> None:
+        if not isinstance(it, SyncItem) or not isinstance(it.meta, Meta):
+            raise ValueError("apply_sync takes SyncItems")
+        _check_id(it.id)
+        if it.meta.id != it.id:
+            raise ValueError("SyncItem.meta.id differs from SyncItem.id")
+        _entries.check_secrets(it.secrets)
+
+    def _tombstone(self, gone: set, counts: dict) -> None:
+        entries = self._doc["entries"]
+        now = _time.time()
+        for id in gone:
+            rec = entries.get(id) if isinstance(id, str) else None
+            if rec is not None and not rec.get("deleted"):
+                rec["deleted"], rec["deleted_at"] = True, now
+                counts["deleted"] += 1
+
+    def _upsert(self, items: list, counts: dict) -> None:
         entries = self._doc["entries"]
         now = _time.time()
         for it in items:
@@ -761,13 +814,6 @@ class UserStore:
                 # sync cannot leave a history box meta does not know (and a stale pwmac that
                 # would file the current password as history on the next sync).
                 self._write_meta()
-        for id in gone:
-            rec = entries.get(id) if isinstance(id, str) else None
-            if rec is not None and not rec.get("deleted"):
-                rec["deleted"], rec["deleted_at"] = True, now
-                counts["deleted"] += 1
-        self._write_meta()
-        return counts
 
     @_serialized
     def pwmac_matches(self, texts: list[str]) -> list[int]:

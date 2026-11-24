@@ -163,7 +163,7 @@ class WindowWiringTests(unittest.TestCase):
     def test_a_read_only_title_opens_no_rename(self):
         # Audit #2: a click on the title raised the account's dialog and opened rename on a
         # Recently Deleted or passkey-only row, for a set the daemon always refuses.
-        self.assertIn('return !!s && (!!s.recently_deleted || s.kind === "passkey");',
+        self.assertIn('return !!s && (!!s.recently_deleted || s.kind === "passkey" || !!s.shared_group);',
                       function_body("selectedReadOnly"))
         title = CODE[CODE.index("HoverHandler { id: hTitle }"):]
         area = title[title.index("MouseArea {"):]
@@ -194,9 +194,12 @@ class WindowWiringTests(unittest.TestCase):
         self.assertRegex(js, r'key: "deleted",[^\n]*flag: "apple_deleted"')
         self.assertRegex(js, r'key: "codes",[^\n]*flag: ""')
         self.assertRegex(js, r'key: "wifi",[^\n]*flag: ""')
-        # Security, Shared Groups and the Family card are not offered at all.
-        for word in ("Security", "Shared", "Family", "security", "shared"):
+        # Security and the Family card are not offered at all. "Shared" is the read-only view
+        # of the shared groups the person owns, and appears only while an entry is in one.
+        for word in ("Security", "Family", "security"):
             self.assertNotIn(word, qmlscan.strip_comments(js), word)
+        self.assertRegex(js, r'key: "shared",[^\n]*flag: ""')
+        self.assertIn("HIDDEN_WHEN_EMPTY", js)
 
 
 class TagsRowTests(unittest.TestCase):
@@ -275,7 +278,7 @@ class ReadOnlyRowTests(unittest.TestCase):
 
     def test_read_only_rows_lose_their_edits(self):
         rows = function_body("fieldRows")
-        self.assertIn('const readOnly = !!s.recently_deleted || s.kind === "passkey";', rows)
+        self.assertIn('const readOnly = !!s.recently_deleted || s.kind === "passkey" || !!s.shared_group;', rows)
         self.assertEqual(rows.count("readOnly ? root.withoutEdits(rows) : rows"), 2)
         strip = function_body("withoutEdits")
         self.assertIn('a.key !== "change" && a.key.indexOf("edit") !== 0', strip)

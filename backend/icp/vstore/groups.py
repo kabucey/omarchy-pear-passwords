@@ -34,7 +34,10 @@ def compute(doc: dict, nicknames: dict | None = None) -> dict[str, str]:
     for i, rec in doc["entries"].items():
         if rec.get("deleted") or not _eligible(rec):
             continue
-        buckets.setdefault((rec["username"].strip(), rec["pwmac"]), []).append(i)
+        # Entries of a shared group are paired inside that group only: never with an entry of
+        # the person's own keychain, nor with another group's.
+        buckets.setdefault((rec.get("shared_group") or "", rec["username"].strip(),
+                            rec["pwmac"]), []).append(i)
     out: dict[str, str] = {}
     for ids in buckets.values():
         if len(ids) < 2:

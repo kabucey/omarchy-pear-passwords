@@ -32,6 +32,23 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$")
 PREFIX = "k1-"
 HEX_CHARS = 40          # 160 bits of SHA-256: no accidental collision across one keychain
 
+# Entries that come from an Apple Passwords shared group live in their own id namespace: a
+# different prefix, hashed over the group as well, so a shared entry can never take an own
+# entry's id (or the other way round) and sync can tell the two apart by the id alone.
+SHARED_PREFIX = "sh1-"
+
+
+def is_shared_id(value) -> bool:
+    return isinstance(value, str) and value.startswith(SHARED_PREFIX)
+
+
+def shared_entry_id(zone: str, inner_id: str) -> str:
+    """The id of an item inside shared group `zone`, from the id the same item would have
+    outside any group. Stable across syncs; the group is only ever hashed, never kept."""
+    h = hashlib.sha256(b"pear/v2/shared\x00" + str(zone).encode("utf-8", "surrogatepass")
+                       + b"\x00" + str(inner_id).encode("utf-8", "surrogatepass"))
+    return SHARED_PREFIX + h.hexdigest()[:HEX_CHARS]
+
 
 # Salt of a copy in Apple's Recently Deleted: the deleted and the live copy of one account are
 # two entries, and must never collapse into one or take each other's id.
