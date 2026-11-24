@@ -90,3 +90,14 @@ class DialogBackdropTests(unittest.TestCase):
 
     def test_the_sheets_no_longer_paint_their_own_darkness(self):
         self.assertNotIn("color: Qt.rgba(0, 0, 0, 0.55)\n", CODE)
+
+
+class LaunchFocusTests(unittest.TestCase):
+    """A fresh launch takes the keyboard: the first showing asks Hyprland for focus, the same
+    dispatch a second launch uses, so typing searches without touching the mouse."""
+
+    def test_first_showing_asks_for_focus_once(self):
+        self.assertIn("onVisibleChanged: if (visible && !root.launchFocused) "
+                      "{ root.launchFocused = true; launchFocus.start(); }", CODE)
+        self.assertIn("Timer { id: launchFocus; interval: 150; "
+                      "onTriggered: focusProc.running = true }", CODE)

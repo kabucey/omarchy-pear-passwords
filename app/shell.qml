@@ -567,6 +567,8 @@ ShellRoot {
         interval: 1500; running: !root.windowReady; onTriggered: root.windowReady = true
     }
     Timer { interval: 800; running: true; onTriggered: root.connectGrace = true }
+    property bool launchFocused: false
+    Timer { id: launchFocus; interval: 150; onTriggered: focusProc.running = true }
     Process {
         id: focusProc
         running: false
@@ -2268,6 +2270,10 @@ ShellRoot {
         // so a second launch that only raises the first window never flashes on screen.
         visible: root.windowReady && (root.phase !== "connecting" || root.connectGrace)
         onClosed: Qt.quit()
+        // Hyprland does not always hand a new window the keyboard (a launcher closing, or the
+        // pointer resting on another window with follow_mouse), so the first showing asks for
+        // focus the same way a second launch does, once the window has had a moment to map.
+        onVisibleChanged: if (visible && !root.launchFocused) { root.launchFocused = true; launchFocus.start(); }
 
         Rectangle { anchors.fill: parent; color: Theme.bg }
 
