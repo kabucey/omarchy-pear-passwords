@@ -941,6 +941,39 @@ class DiagSharingTests(Base):
         self.assertNotIn("probe_sharing", self.h.apple.calls)
 
 
+class DiagSharingDecryptTests(Base):
+    """diag-sharing-decrypt: the read-only decrypt diagnostic. The same gates as diag-sharing,
+    and only its own call runs (no sync, no push, no store write)."""
+
+    async def test_needs_tier1_manage_and_a_session(self):
+        self.assertEqual((await self.ui.call("diag-sharing-decrypt"))["error"], "locked")
+        self.assertEqual(self.dialogs(), [])
+        await self.h.unlock(self.ui)
+        self.st.save_session({})
+        self.assertEqual((await self.ui.call("diag-sharing-decrypt"))["error"], "not-signed-in")
+        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK, paths.ACTION_MANAGE])
+        self.h.authority.outcome = "dismissed"
+        self.assertEqual((await self.ui.call("diag-sharing-decrypt"))["error"], "dismissed")
+        self.assertNotIn("probe_sharing_decrypt", self.h.apple.calls)
+
+    async def test_returns_the_report_and_touches_nothing_else(self):
+        await self.h.unlock(self.ui)
+        self.st.save_session({"dsid": "fake"})
+        before = list(self.h.apple.calls)
+        r = await self.ui.call("diag-sharing-decrypt")
+        self.assertEqual(r["report"]["mode"], "decrypt")
+        self.assertEqual(self.h.apple.calls[len(before):], ["probe_sharing_decrypt"])
+        self.assertIsNone(next(iter(self.h.reg.sessions.values())).busy)
+
+    async def test_refused_while_apple_work_runs(self):
+        await self.h.unlock(self.ui)
+        self.st.save_session({"dsid": "fake"})
+        sess = next(iter(self.h.reg.sessions.values()))
+        sess.busy = "sync"
+        self.assertEqual((await self.ui.call("diag-sharing-decrypt"))["error"], "busy-sync")
+        self.assertNotIn("probe_sharing_decrypt", self.h.apple.calls)
+
+
 class DiagItemsTests(Base):
     SHAPE = {("keys", "com.apple.webkit.webauthn"):
              {"count": 3, "keys": {"agrp", "class", "klbl", "labl", "v_Data"},

@@ -367,6 +367,46 @@ class OctagonClient:
         diag.dump(logging.getLogger(__name__), "sharing probe", report)
         return report
 
+    def probe_sharing_decrypt(self) -> dict:
+        """READ-ONLY diagnostic: decrypt the shared groups you own and report counts only.
+
+        Sends only fetches: what a normal keychain sync sends (fetchRecoverableTLKShares and
+        the CKKS record fetches, here only to read the Protected Cloud Storage service keys out
+        of the keychain in memory), then to the shared-keychain container op 203 (zones of
+        the private database), op 201 (a zone's protection info) and op 213 (its records).
+        Nothing is saved, deleted, joined or applied to the vault, no sync token is kept, and
+        no plaintext leaves icp.sharing.diagnose (see its docstring)."""
+        from ..sharing import diagnose as sharing_diag
+
+        report: dict = {"container": cloudkit.KCSHARING_CONTAINER, "mode": "decrypt"}
+        try:
+            tlks, view_synckeys = self.fetch_recoverable_tlks()
+            records = self.sync_keychain()
+            records.setdefault("synckey", []).extend(view_synckeys)
+            oct_state = self.record["octagon"]
+            plain = pipeline.unwrap_tlkshares(
+                records.get("tlkshare", []), oct_state["peer_id"],
+                load_peer_keys(oct_state).encryption.private_key)
+            pcs_keys, key_stats = sharing_diag.pcs_keys_from_records(records, {**plain, **tlks})
+            del records, tlks
+            report["keychain"] = key_stats
+            kc_user = cloudkit.ck_app_init(cloudkit.KCSHARING_CONTAINER,
+                                           cloudkit.KCSHARING_BUNDLE, self.mme_dsid,
+                                           self.mme_token, self.anisette)
+        except Exception as e:  # noqa: BLE001 - diagnostics must not raise
+            report["error"] = _err_summary(e)
+            diag.dump(logging.getLogger(__name__), "sharing decrypt", report)
+            return report
+        transport = cloudkit.CloudKitTransport(self.ck_token, kc_user, self.transport.device,
+                                               self.anisette,
+                                               container=cloudkit.KCSHARING_CONTAINER)
+        try:
+            report.update(sharing_diag.run(transport, kc_user, pcs_keys))
+        finally:
+            pcs_keys.clear()
+        diag.dump(logging.getLogger(__name__), "sharing decrypt", report)
+        return report
+
     def _recover_sponsor(self, escrow_host: str, email: str, pet: str, passcode: bytes,
                          chosen: dict | None = None, *, confirm_irreversible: bool):
         """Recover the chosen escrow bottle (IRREVERSIBLE) and persist the recovered sponsor

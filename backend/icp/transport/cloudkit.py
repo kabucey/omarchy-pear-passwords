@@ -52,6 +52,10 @@ CKDATABASE_ZONE_SYNC_URL = "https://gateway.icloud.com/ckdatabase/api/client/zon
 # zone save and 202 zone delete: never sent by anything here.)
 OP_TYPE_ZONE_RETRIEVE_CHANGES = 203
 FIELD_ZONE_RETRIEVE_CHANGES = 203
+# Operation.Type ZONE_RETRIEVE_TYPE = 201: one zone's details, here its PCS protection info. A FETCH.
+OP_TYPE_ZONE_RETRIEVE = 201
+FIELD_ZONE_RETRIEVE = 201
+CKDATABASE_ZONE_RETRIEVE_URL = "https://gateway.icloud.com/ckdatabase/api/client/zone/retrieve"
 ISOLATION_ZONE = 1
 IDENTIFIER_TYPE_DEVICE = 2
 OP_TYPE_FUNCTION_INVOKE = 1101
@@ -340,3 +344,13 @@ class CloudKitTransport:
             ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=bundle,
             database=database, scope=scope)
         return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""
+
+    def probe_zone_retrieve(self, zone_identifier: bytes, *, bundle: str, database: int,
+                            scope: str) -> bytes:
+        """LIVE, READ-ONLY, DIAGNOSTIC. ZoneRetrieve (op 201): one zone's details, including the
+        PCS protection info the shared-group diagnostic opens. Never used by sync."""
+        req = Writer().bytes(1, zone_identifier).finish()
+        result = self._perform(
+            CKDATABASE_ZONE_RETRIEVE_URL, OP_TYPE_ZONE_RETRIEVE, FIELD_ZONE_RETRIEVE, req,
+            bundle=bundle, database=database, scope=scope)
+        return result.field(FIELD_ZONE_RETRIEVE) or b""

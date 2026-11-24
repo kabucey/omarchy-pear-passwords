@@ -1156,6 +1156,31 @@ async def op_diag_sharing(reg, conn, req):
     return {"report": report}
 
 
+async def op_diag_sharing_decrypt(reg, conn, req):
+    """READ-ONLY: decrypt the shared groups you own and report counts only
+    (apple.probe_sharing_decrypt). Same gates as diag-sharing: tier 1, a signed-in account,
+    .manage, and never alongside other Apple work. The report is integers, booleans, record
+    types and exception class names, never a value, a group name or an id."""
+    s = _tier1(reg, conn)
+    epoch = s.epoch
+    await reg.authorize(conn, paths.ACTION_MANAGE, {})
+    _still(s, conn, epoch)
+    st = await _store(reg, s.uid, s.store.status)
+    if not st.get("signed_in"):
+        raise OpError("not-signed-in")
+    if s.busy:
+        raise OpError("busy-sync")
+    s.busy = "probe"
+    try:
+        ctx = UserContext(s.uid, s.store, reg.anisette_url, None)
+        report = await _apple_call(reg, s, reg.apple.probe_sharing_decrypt, ctx)
+    finally:
+        if s.busy == "probe":
+            s.busy = None
+    _still(s, conn, epoch)
+    return {"report": report}
+
+
 # --- ui: migration and cleanup ------------------------------------------------------------------
 
 async def _save_setting_keys(reg, s, **changes) -> None:
@@ -1575,4 +1600,5 @@ HANDLERS = {
     "autofill-fill": op_autofill_fill,
     "autofill-enable": op_autofill_enable,
     "copy-text": op_copy_text, "features": op_features, "diag-items": op_diag_items, "diag-sharing": op_diag_sharing,
+    "diag-sharing-decrypt": op_diag_sharing_decrypt,
 }

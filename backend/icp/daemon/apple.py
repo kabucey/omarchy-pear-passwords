@@ -183,6 +183,24 @@ def probe_sharing(ctx: "UserContext") -> dict:
     return client.probe_sharing()
 
 
+def probe_sharing_decrypt(ctx: "UserContext") -> dict:
+    """READ-ONLY: decrypt the Apple Passwords shared groups you own and report counts only
+    (OctagonClient.probe_sharing_decrypt). Only fetches are sent; the only store write is the
+    refreshed session, exactly as probe_sharing keeps it. The decrypted keys and values stay in
+    that call's memory; nothing is applied to the vault, no sync token is saved, and the
+    report holds counts, never a value, name or id."""
+    from ..octagon import client as octagon
+
+    s = _session(ctx)
+    device, anisette = _device(ctx)
+    _still_unlocked(ctx)
+    _fresh_tokens(ctx, s, device, anisette)
+    client = octagon.OctagonClient(s, device, anisette)
+    session_store.save(ctx.store, s)   # the refreshed cloudKitToken, exactly as a sync keeps it
+    _still_unlocked(ctx)
+    return client.probe_sharing_decrypt()
+
+
 # --------------------------------------------------------------------------- sign-in
 
 def _signin(ctx: "UserContext", prior: dict) -> None:
