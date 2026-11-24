@@ -31,6 +31,17 @@ class ListMotionTests(unittest.TestCase):
         self.assertNotIn("WheelHandler", lst)
         self.assertNotIn("FrameAnimation", lst)
 
+    def test_no_scroll_overrides_anywhere(self):
+        # Every scroll area is a stock Flickable/ListView: no tuned bounds, deceleration,
+        # velocity or wheel remapping in any of the window's files.
+        import glob, os
+        for path in glob.glob(os.path.join(qmlscan.APP, "*.qml")):
+            with open(path, encoding="utf-8") as f:
+                src = f.read()
+            for word in ("boundsBehavior", "boundsMovement", "flickDeceleration",
+                         "maximumFlickVelocity", "WheelHandler", "stopPhysics"):
+                self.assertNotIn(word, src, f"{os.path.basename(path)}: {word}")
+
     def test_no_touchpad_watcher(self):
         self.assertNotIn("touchWatch", CODE)
         self.assertNotIn("touch_watch.py", CODE)

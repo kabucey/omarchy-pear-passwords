@@ -361,7 +361,6 @@ TextField {
                                               - (catSearch.catTyping ? 30 : 0)
                                               - (catSearch.catRows.length === 0 ? 30 : 0)))
                 clip: true
-                boundsBehavior: Flickable.StopAtBounds
                 model: catSearch.catRows
                 ScrollBar.vertical: AppScrollBar {}
                 delegate: Item {

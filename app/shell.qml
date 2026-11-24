@@ -3822,7 +3822,6 @@ ShellRoot {
                     anchors.fill: parent
                     contentWidth: width
                     contentHeight: edSheet.implicitHeight + 60
-                    boundsBehavior: Flickable.StopAtBounds
                     clip: true
                     ScrollBar.vertical: AppScrollBar {}
                 ColumnLayout {
@@ -5195,7 +5194,6 @@ ShellRoot {
                     anchors.margins: 30
                     contentHeight: setSheet.implicitHeight
                     clip: true
-                    boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: AppScrollBar {}
 
                 ColumnLayout {
