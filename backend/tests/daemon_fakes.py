@@ -341,6 +341,10 @@ class FakeApple:
                 "shared": {"Passwords@db2": {"error": {"type": "CloudKitError", "code": 26,
                                                        "description": "zone not found"}}}}
 
+    def probe_sharing_decrypt(self, ctx):
+        self.calls.append("probe_sharing_decrypt")
+        return {"mode": "decrypt", "groups": [], "totals": {"items": 0}}
+
     def signout(self, ctx):
         self.calls.append("signout")
         ctx.store.save_session({})

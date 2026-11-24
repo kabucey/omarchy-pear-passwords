@@ -74,7 +74,7 @@ asks for a password:
 | Action | The dialog says | When |
 | --- | --- | --- |
 | `io.github.dragosol.pearpasswords.unlock` | Unlock Pear Passwords to show your accounts | Each time you open Pear, and after it locks |
-| `io.github.dragosol.pearpasswords.manage` | Change Pear Passwords on this computer | Signing in or out, adding or deleting, moving from 1.x, starting over, deleting the old 1.x copy, checking clipboard history, turning browser autofill on, moving your keys onto the security chip, turning a category that waits for a check (Passkeys, Recently Deleted) on or off, reading the keychain diagnostic, checking where shared groups live |
+| `io.github.dragosol.pearpasswords.manage` | Change Pear Passwords on this computer | Signing in or out, adding or deleting, moving from 1.x, starting over, deleting the old 1.x copy, checking clipboard history, turning browser autofill on, moving your keys onto the security chip, turning a category that waits for a check (Passkeys, Recently Deleted) on or off, reading the keychain diagnostic, checking where shared groups live, counting what your shared groups hold |
 | `io.github.dragosol.pearpasswords.autofill` | A browser extension asks to fill the password for $(account) on $(origin) | Every browser fill, if you set up autofill |
 | `io.github.dragosol.pearpasswords.autofill-names` | A browser extension asks to see which accounts you have saved for $(origin) | When the browser's picker asks to name a site's accounts before any fill (once per site until Pear locks) |
 
@@ -119,7 +119,7 @@ one command for you to run with sudo:
 
 <!-- pinned: tools/gen-sha256sums.sh keeps the hash below equal to sha256(SHA256SUMS) -->
 ```sh
-sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "98181a24074e91094739c43ef63c8ce05dc3884ddc1c29cd68ba7c26e0d47b58  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
+sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "edaad5bb755eae03f8be6e8d2ecb81d4a5c82ef980ec4d8f8a2125f4a39f56d6  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
 ```
 
 The command copies the stage into a fresh directory only root can write, checks that its
@@ -578,7 +578,8 @@ fails until both are current.
 ## Credits
 
 The backend builds on the original Linux iCloud sync backend by
-[Sankarsh Makam](https://github.com/Sank6) (MIT). Anisette data comes from
+[Sankarsh Makam](https://github.com/Sank6) (MIT); the shared-group decryption in
+`backend/icp/sharing/` is ported from the same project. Anisette data comes from
 [anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) by Dadoum, built from source
 as described in [docs/anisette-provenance.md](docs/anisette-provenance.md). That project
 declares no license.

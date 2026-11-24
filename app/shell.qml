@@ -1576,6 +1576,67 @@ ShellRoot {
             root.diagText = lines.join("\n");
         });
     }
+    // Counts of what the shared groups you own hold, to explain the number Apple shows
+    // (diag-sharing-decrypt; read-only: fetches only, nothing reaches the vault). The report
+    // has integers, record types and error class names, never a value, a name or an id.
+    function sharingDecryptLines(rep) {
+        const lines = [];
+        if (rep.error) {
+            lines.push("error " + (rep.error.code === null || rep.error.code === undefined ? "" : rep.error.code + " ")
+                       + rep.error.type + (rep.error.description ? ": " + rep.error.description : ""));
+        }
+        const kc = rep.keychain;
+        if (kc) lines.push("keychain  " + kc.items + " items, " + kc.undecryptable + " unreadable, "
+                           + kc.pcs_keys + " shared-group keys");
+        if (rep.groups_owned !== undefined) lines.push("groups you own  " + rep.groups_owned);
+        function counts(o) {
+            return Object.keys(o || {}).sort().map(function (k) { return o[k] + " × " + k; }).join(", ");
+        }
+        function block(g, indent) {
+            const out = [];
+            if (g.error) { out.push(indent + "error " + g.error.type); return out; }
+            if (g.paging) {
+                out.push(indent + "paging  " + g.paging.pages + " pages, statuses " + (counts(g.paging.statuses) || "none")
+                         + (g.paging.complete ? "" : ", NOT complete")
+                         + (g.paging.changes_without_record ? ", " + g.paging.changes_without_record + " changes without a record" : ""));
+            }
+            if (g.zone_opened !== undefined && typeof g.zone_opened === "boolean") {
+                out.push(indent + "key found " + (g.service_key_found ? "yes" : "no") + ", opened " + (g.zone_opened ? "yes" : "no")
+                         + (g.open_error ? " (" + g.open_error + ")" : "") + ", name " + (g.name_decrypted ? "readable" : "not readable"));
+            }
+            out.push(indent + g.records + " records (" + (counts(g.types) || "none") + "), "
+                     + g.duplicate_record_names + " repeated names");
+            out.push(indent + g.items + " items: " + g.decrypted + " decrypted, "
+                     + g.items_without_payload + " without payload"
+                     + (Object.keys(g.failed || {}).length ? ", failed " + counts(g.failed) : ""));
+            if (Object.keys(g.payload_kinds || {}).length) out.push(indent + "payload kinds  " + counts(g.payload_kinds));
+            if (Object.keys(g.type_field || {}).length) out.push(indent + "type field  " + counts(g.type_field));
+            if (Object.keys(g.agrp || {}).length) out.push(indent + "access groups  " + counts(g.agrp));
+            out.push(indent + g.internet_passwords + " internet passwords: " + g.empty_password + " empty password, "
+                     + g.empty_server + " no site, " + g.empty_account + " no account");
+            out.push(indent + g.distinct_server_account + " distinct site+account, "
+                     + g.distinct_server_account_password + " distinct with password");
+            return out;
+        }
+        (rep.groups || []).forEach(function (g) {
+            lines.push("group " + g.group);
+            block(g, "  ").forEach(function (l) { lines.push(l); });
+        });
+        if (rep.totals) {
+            lines.push("all groups");
+            block(rep.totals, "  ").forEach(function (l) { lines.push(l); });
+        }
+        return lines;
+    }
+    function runSharingDecrypt() {
+        root.diagBusy = true;
+        root.diagText = "";
+        root.send("diag-sharing-decrypt", {}, function (d) {
+            root.diagBusy = false;
+            if (d.error) { root.diagText = root.errorWords(d); return; }
+            root.diagText = root.sharingDecryptLines(d.report || {}).join("\n");
+        });
+    }
     onSettingsOpenChanged: if (root.settingsOpen && root.phase === "ready") root.loadFeatures()
 
     FileView {
@@ -5434,6 +5495,15 @@ ShellRoot {
                             enabled: !root.diagBusy
                             fontSize: Theme.fSmall
                             onClicked: root.runSharingProbe()
+                        }
+                        // Read-only: decrypts the groups you own in memory and shows counts
+                        // only (diag-sharing-decrypt); nothing reaches the vault.
+                        AppButton {
+                            visible: root.signedIn
+                            text: root.diagBusy ? "Checking…" : "Decrypt shared groups"
+                            enabled: !root.diagBusy
+                            fontSize: Theme.fSmall
+                            onClicked: root.runSharingDecrypt()
                         }
                     }
                     Rectangle {
