@@ -792,21 +792,22 @@ async def op_set(reg, conn, req):
     generate = req.get("generate")
     clean = validate_fields(fields, generate, protocol.SET_FIELDS)
     s = _tier1(reg, conn)
-    try:       # first of all: a shared entry has no grant to be had for an edit
-        early = await _store(reg, conn.uid, s.store.get_meta, id)
-    except OpError:
-        early = None
-    if getattr(early, "shared_group", ""):
+    epoch = s.epoch
+    # Read once, first of all: a shared entry (read-only whatever the field, a rename and a
+    # tag change included) has no grant to be had for an edit, and nothing goes to iCloud.
+    # A failed read waits until the grant check has had its say, as it always did.
+    meta, meta_error = None, None
+    try:
+        meta = await _store(reg, conn.uid, s.store.get_meta, id)
+    except OpError as e:
+        meta_error = e
+    if meta is not None and meta.is_shared:
         raise OpError("shared-read-only")
     reg.grant_check(conn.uid, id)
-    # A Recently Deleted copy and a passkey-only row are read-only: nothing to push them to.
-    epoch = s.epoch
-    meta = await _store(reg, conn.uid, s.store.get_meta, id)
+    if meta_error is not None:
+        raise meta_error
     _still(s, conn, epoch)
-    # An entry of a shared group is read-only, whatever the field (a rename and a tag change
-    # included): refused before a grant is taken or anything is sent to iCloud.
-    if getattr(meta, "shared_group", ""):
-        raise OpError("shared-read-only")
+    # A Recently Deleted copy and a passkey-only row are read-only: nothing to push them to.
     if getattr(meta, "recently_deleted", False) or getattr(meta, "kind", "login") == "passkey":
         raise OpError("invalid", field="id")
     # A Wi-Fi network has no details record (the WiFi zone keeps none), so its notes, and the
@@ -897,7 +898,7 @@ async def op_delete(reg, conn, req):
     id = _need_id(req)
     s = _tier1(reg, conn)
     meta = await _store(reg, conn.uid, s.store.get_meta, id)
-    if getattr(meta, "shared_group", ""):      # before any dialog, as for the rows below
+    if meta.is_shared:      # before any dialog, as for the rows below
         raise OpError("shared-read-only")
     # Read-only rows, as in op_set. A Recently Deleted copy keeps the live account's domain and
     # username, so a delete would remove the LIVE login. Refused before any dialog.
@@ -1150,34 +1151,9 @@ async def op_diag_items(reg, conn, req):
 
 
 async def op_diag_sharing(reg, conn, req):
-    """READ-ONLY probe for Apple Passwords shared groups (apple.probe_sharing): asks iCloud
-    for the candidate shared zones with the one fetch sync already makes, and returns what it
-    answered as record types, counts, field names and error codes, never a value. Needs tier 1,
-    a signed-in account and raises .manage; refused while a sync or another Apple call runs."""
-    s = _tier1(reg, conn)
-    epoch = s.epoch
-    await reg.authorize(conn, paths.ACTION_MANAGE, {})
-    _still(s, conn, epoch)
-    st = await _store(reg, s.uid, s.store.status)
-    if not st.get("signed_in"):
-        raise OpError("not-signed-in")
-    if s.busy:
-        raise OpError("busy-sync")
-    s.busy = "probe"
-    try:
-        ctx = UserContext(s.uid, s.store, reg.anisette_url, None)
-        report = await _apple_call(reg, s, reg.apple.probe_sharing, ctx)
-    finally:
-        if s.busy == "probe":
-            s.busy = None
-    _still(s, conn, epoch)
-    return {"report": report}
-
-
-async def op_diag_sharing_decrypt(reg, conn, req):
     """READ-ONLY: decrypt the shared groups you own and report counts only
-    (apple.probe_sharing_decrypt). Same gates as diag-sharing: tier 1, a signed-in account,
-    .manage, and never alongside other Apple work. The report is integers, booleans, record
+    (apple.probe_sharing). Needs tier 1, a signed-in account, .manage, and never alongside
+    other Apple work. The report is integers, booleans, record
     types and exception class names, never a value, a group name or an id."""
     s = _tier1(reg, conn)
     epoch = s.epoch
@@ -1191,7 +1167,7 @@ async def op_diag_sharing_decrypt(reg, conn, req):
     s.busy = "probe"
     try:
         ctx = UserContext(s.uid, s.store, reg.anisette_url, None)
-        report = await _apple_call(reg, s, reg.apple.probe_sharing_decrypt, ctx)
+        report = await _apple_call(reg, s, reg.apple.probe_sharing, ctx)
     finally:
         if s.busy == "probe":
             s.busy = None
@@ -1618,5 +1594,4 @@ HANDLERS = {
     "autofill-fill": op_autofill_fill,
     "autofill-enable": op_autofill_enable,
     "copy-text": op_copy_text, "features": op_features, "diag-items": op_diag_items, "diag-sharing": op_diag_sharing,
-    "diag-sharing-decrypt": op_diag_sharing_decrypt,
 }

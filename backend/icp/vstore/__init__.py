@@ -102,6 +102,11 @@ class Meta:
     # member of a group carries the same non-empty value; "" for an entry that is alone.
     group: str = ""
 
+    @property
+    def is_shared(self) -> bool:
+        """Whether the entry belongs to a shared group (and so is read-only here)."""
+        return bool(self.shared_group)
+
 
 @dataclass
 class Secrets:
@@ -632,6 +637,12 @@ class UserStore:
         return out
 
     @_serialized
+    def count_shared(self) -> int:
+        """How many live entries belong to a shared group. Raises StoreLocked."""
+        self._need_unlocked()
+        return sum(1 for _, r in _meta.live(self._doc) if r.get("shared_group"))
+
+    @_serialized
     def get_meta(self, id: str) -> Meta:
         """One live entry's Meta. Raises StoreLocked or EntryNotFound."""
         self._need_unlocked()
@@ -762,7 +773,8 @@ class UserStore:
             keep = {it.id for it in items}
             self._tombstone({i for i, r in _meta.live(self._doc)
                              if _ids.is_shared_id(i) and i not in keep}, counts)
-        self._write_meta()
+        if counts["added"] or counts["changed"] or counts["deleted"]:
+            self._write_meta()
         return counts
 
     @staticmethod

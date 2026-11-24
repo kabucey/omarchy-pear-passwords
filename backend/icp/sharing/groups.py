@@ -16,11 +16,20 @@ import struct
 
 from ..proto.codec import decode_fields, first, first_str
 from ..transport import ckks, cloudkit
-from . import pcs
+from . import bump, pcs
 
 MAX_RECORD_PAGES = 200
 MAX_ZONE_PAGES = 25
 STATUS_MORE, STATUS_DONE = 1, 3          # op 213, as OctagonClient.sync_keychain reads them
+
+
+_PRIVATE = {"bundle": cloudkit.KCSHARING_BUNDLE, "database": cloudkit.DB_PRIVATE,
+            "scope": "Private"}      # every call here goes to the private database
+
+
+def is_owned(zone: dict, kc_user: str) -> bool:
+    """Whether a listed zone is a group you own (its owner is you, or the default owner)."""
+    return zone.get("owner") in ("", kc_user, "__defaultOwner__")
 
 
 def list_zones(transport) -> list[dict]:
@@ -28,9 +37,8 @@ def list_zones(transport) -> list[dict]:
     deleted ones. Pages until the server says it is done."""
     zones, continuation = [], None
     for _ in range(MAX_ZONE_PAGES):
-        page = ckks.parse_zone_changes_response(transport.probe_zone_changes(
-            continuation, bundle=cloudkit.KCSHARING_BUNDLE, database=cloudkit.DB_PRIVATE,
-            scope="Private"))
+        page = ckks.parse_zone_changes_response(transport.fetch_zone_changes(
+            continuation, **_PRIVATE))
         zones.extend(page["zones"])
         continuation = page.get("continuation_token")
         if page.get("status") == 2 or not continuation:
@@ -39,10 +47,9 @@ def list_zones(transport) -> list[dict]:
     return [z for z in zones if z["name"].startswith("group-") and z["name"] not in deleted]
 
 
-def fetch_zone_protection(transport, zone_raw: bytes, *, database: int, scope: str) -> dict:
+def fetch_zone_protection(transport, zone_raw: bytes) -> dict:
     """Op 201: {protection, record_protection}, the zone's PCS protection blobs (or None)."""
-    resp = transport.probe_zone_retrieve(zone_raw, bundle=cloudkit.KCSHARING_BUNDLE,
-                                         database=database, scope=scope)
+    resp = transport.fetch_zone(zone_raw, **_PRIVATE)
     summary = first(decode_fields(resp), 1)
     zone = first(decode_fields(summary), 1) if summary else None
     zf = decode_fields(zone) if zone else {}
@@ -77,7 +84,7 @@ def parse_record(raw: bytes) -> dict:
             "protection": first(decode_fields(prot), 1) if prot else None}
 
 
-def fetch_records(transport, zone_raw: bytes, *, database: int, scope: str) -> tuple[list, dict]:
+def fetch_records(transport, zone_raw: bytes) -> tuple[list, dict]:
     """Every record of a zone, paged the way sync_keychain pages (status 1 = another page,
     3 = done, anything else is not complete). Returns (records, paging) where paging is
     {pages, statuses: {status: count}, complete, changes_without_record}; no value in it."""
@@ -85,9 +92,8 @@ def fetch_records(transport, zone_raw: bytes, *, database: int, scope: str) -> t
     paging = {"pages": 0, "statuses": {}, "complete": False, "changes_without_record": 0}
     continuation, seen = None, set()
     for _ in range(MAX_RECORD_PAGES):
-        raw = transport.probe_records(ckks.build_retrieve_changes_request(zone_raw, continuation),
-                                      bundle=cloudkit.KCSHARING_BUNDLE,
-                                      database=database, scope=scope)
+        raw = transport.fetch_records(
+            ckks.build_retrieve_changes_request(zone_raw, continuation), **_PRIVATE)
         f = decode_fields(raw)
         paging["pages"] += 1
         for change in f.get(1, []):
@@ -97,8 +103,7 @@ def fetch_records(transport, zone_raw: bytes, *, database: int, scope: str) -> t
             else:
                 out.append(parse_record(rec))
         status, continuation = first(f, 4), first(f, 2)
-        key = str(status)
-        paging["statuses"][key] = paging["statuses"].get(key, 0) + 1
+        bump(paging["statuses"], str(status))
         if status == STATUS_DONE:
             paging["complete"] = True
             break

@@ -3,7 +3,7 @@
 The PCS primitives are tested the way Sank6/iCloud-Keychain-for-Linux (MIT) tests them (the
 primitive tests below are ported from its tests/test_sharing.py). The diagnostic may send
 exactly op 201, 203 and 213 to the sharing container, never 200 (zone save), 202 (zone delete)
-or 210 (record save), and the only store write is the refreshed session, as probe_sharing does.
+or 210 (record save), and the only store write is the refreshed session, as a sync does.
 """
 
 import ast
@@ -96,15 +96,6 @@ class PrimitiveTests(unittest.TestCase):
         octet = b"\x04" + bytes([len(pb)]) + pb
         der = b"\x65" + bytes([len(octet)]) + octet  # [APPLICATION 5]
         self.assertEqual(pcs.compact_x(pcs.private_key_from_der(der)), pcs.compact_x(priv))
-
-    def test_keychain_key_index(self):
-        import base64
-        x = b"\x01" * 32
-        idx = pcs.keychain_key_index([
-            {"agrp": "com.apple.ProtectedCloudStorage", "acct": base64.b64encode(x).decode(),
-             "v_Data": b"der"},
-            {"agrp": "com.apple.cfnetwork", "acct": "a", "v_Data": b"pw"}])
-        self.assertEqual(idx, {x: b"der"})
 
 
 class SharingItemTests(unittest.TestCase):
@@ -226,7 +217,7 @@ class PcsKeysTests(unittest.TestCase):
         recs = {"item": [ckks.CloudKitRecord(n, "item", {}) for n in ("k", "p", "bad")]}
         with mock.patch.object(pipeline, "decrypt_items", decrypt), \
                 mock.patch.object(pipeline, "unwrap_class_keys", return_value={}):
-            keys, stats = diagnose.pcs_keys_from_records(recs, {})
+            keys, stats = pcs.pcs_keys_from_records(recs, {})
         self.assertEqual(keys, {x: b"der"})
         self.assertEqual(stats, {"items": 3, "undecryptable": 1, "pcs_keys": 1})
 
@@ -280,7 +271,7 @@ class DiagnosticOpsTests(unittest.TestCase):
             mock.patch.object(octagon, "load_peer_keys",
                               return_value=SimpleNamespace(encryption=SimpleNamespace(private_key=None))),
             mock.patch.object(pipeline, "unwrap_tlkshares", return_value={}),
-            mock.patch.object(diagnose, "pcs_keys_from_records",
+            mock.patch.object(pcs, "pcs_keys_from_records",
                               return_value=({b"x": b"der"}, {"items": 3, "undecryptable": 0,
                                                              "pcs_keys": 1})),
             mock.patch.object(diagnose.time, "sleep"),
@@ -300,7 +291,7 @@ class DiagnosticOpsTests(unittest.TestCase):
             p.stop()
 
     def test_only_fetches_are_sent_to_the_sharing_container(self):
-        self.client.probe_sharing_decrypt()
+        self.client.probe_sharing()
         self.assertTrue(self.sent)
         for s in self.sent:
             self.assertIn(s["op"], ALLOWED_OPS)
@@ -315,7 +306,7 @@ class DiagnosticOpsTests(unittest.TestCase):
         self.client.sync_keychain.assert_called_once_with()
 
     def test_report_is_counts_and_follows_every_page(self):
-        rep = self.client.probe_sharing_decrypt()
+        rep = self.client.probe_sharing()
         self.assertEqual(rep["groups_owned"], 1)
         g = rep["groups"][0]
         self.assertEqual(g["paging"], {"pages": 2, "statuses": {"1": 1, "3": 1}, "complete": True,
@@ -330,7 +321,7 @@ class DiagnosticOpsTests(unittest.TestCase):
 
     def test_a_failing_keychain_fetch_reports_and_sends_nothing_to_the_sharing_container(self):
         self.client.sync_keychain.side_effect = octagon.OctagonError("incomplete")
-        rep = self.client.probe_sharing_decrypt()
+        rep = self.client.probe_sharing()
         self.assertEqual(rep["error"]["type"], "OctagonError")
         self.assertEqual(self.sent, [])
 
@@ -356,7 +347,7 @@ class NoVaultTests(unittest.TestCase):
         store = _RecordingStore()
         ctx = SimpleNamespace(store=store, ui=mock.Mock(), interactive=True, anisette_url="u")
         client = mock.Mock()
-        client.probe_sharing_decrypt.return_value = {"mode": "decrypt"}
+        client.probe_sharing.return_value = {"mode": "decrypt"}
         s = {"mme": {}}
         with mock.patch.object(apple.session_store, "load", return_value=s), \
                 mock.patch.object(apple.session_store, "save") as save, \
@@ -364,10 +355,10 @@ class NoVaultTests(unittest.TestCase):
                 mock.patch.object(apple.signin, "ensure_fresh_tokens"), \
                 mock.patch("icp.octagon.client.is_joined", return_value=True), \
                 mock.patch("icp.octagon.client.OctagonClient", return_value=client):
-            self.assertEqual(apple.probe_sharing_decrypt(ctx), {"mode": "decrypt"})
+            self.assertEqual(apple.probe_sharing(ctx), {"mode": "decrypt"})
         self.assertEqual(store.touched, [])
         # ensure_fresh_tokens saves once; the call itself saves once more, after the client
-        # is built, like probe_sharing. Both go through session_store, never a store method.
+        # is built, like a sync. Both go through session_store, never a store method.
         self.assertTrue(all(c.args[0] is store for c in save.call_args_list))
 
     FORBIDDEN = {"apply_sync", "save_session", "save_record", "save_sync_token", "save_nicknames",

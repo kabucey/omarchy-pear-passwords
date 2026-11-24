@@ -13,7 +13,7 @@ import base64
 import hashlib
 import hmac
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.keywrap import InvalidUnwrap, aes_key_unwrap
 
 from ..errors import AppleError
+from ..keychain import pipeline
 from ..proto.codec import decode_fields, first
 
 
@@ -231,7 +232,6 @@ class ShareProtection:
     sig_data: bytes
     hmac: bytes
     truncated_key_id: bytes
-    extra: dict = field(default_factory=dict)
 
     @classmethod
     def parse(cls, raw: bytes) -> "ShareProtection":
@@ -285,17 +285,35 @@ class ShareProtection:
         return [master, *symm], idents
 
 
-def keychain_key_index(items: list[dict]) -> dict[bytes, bytes]:
-    """Index PCS service-key DER by the public X coordinate stored in `acct`."""
-    out = {}
-    for it in items:
-        if not str(it.get("agrp") or "").startswith("com.apple.ProtectedCloudStorage"):
+PCS_AGRP_PREFIX = "com.apple.ProtectedCloudStorage"
+
+
+def pcs_keys_from_records(records_by_type: dict, tlks: dict) -> tuple[dict[bytes, bytes], dict]:
+    """The PCS service keys held in the keychain, {public X: private key DER}, plus counts.
+
+    Normal sync turns decrypted items into credentials and keeps none of these, so this runs
+    the same unwrap chain (tlkshare -> TLK -> class key -> item key) over the records a sync
+    already fetched and keeps only the items whose access group starts with
+    com.apple.ProtectedCloudStorage. `tlks` are the merged TLKs of a normal sync. One bad item
+    is counted, not fatal. Nothing is stored."""
+    class_keys = pipeline.unwrap_class_keys(records_by_type.get("synckey", []), tlks)
+    stats = {"items": 0, "undecryptable": 0, "pcs_keys": 0}
+    keys: dict[bytes, bytes] = {}
+    for rec in records_by_type.get("item", []):
+        stats["items"] += 1
+        try:
+            plist = pipeline.decrypt_items([rec], class_keys)[0]
+        except Exception:  # noqa: BLE001 - counted, never fatal
+            stats["undecryptable"] += 1
             continue
-        acct, data = it.get("acct"), it.get("v_Data")
+        if not str(plist.get("agrp") or "").startswith(PCS_AGRP_PREFIX):
+            continue
+        acct, data = plist.get("acct"), plist.get("v_Data")
         if not isinstance(acct, str) or not isinstance(data, (bytes, bytearray)):
             continue
         try:
-            out[base64.b64decode(acct)] = bytes(data)
+            keys[base64.b64decode(acct)] = bytes(data)
         except (ValueError, TypeError):
             continue
-    return out
+    stats["pcs_keys"] = len(keys)
+    return keys, stats

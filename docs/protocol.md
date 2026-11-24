@@ -586,7 +586,7 @@ the next grant; `idle_lock_s` restarts the idle clock.
   newest first, up to about 56 KB. Compares pwmac only (no entry key); `matches` are indexes into `items`.
   Values are never logged.
 
-### 6.10 features, diag-items, diag-sharing, diag-sharing-decrypt
+### 6.10 features, diag-items, diag-sharing
 
 ```json
 {"op":"features","rid":28,"get":true}      -> {"rid":28,"features":{"passkeys":false,"apple_deleted":false}}
@@ -595,12 +595,7 @@ the next grant; `idle_lock_s` restarts the idle clock.
   -> {"rid":29,"available":true,"items":[{"class":"keys","agrp":"com.apple.webkit.webauthn",
       "count":22,"keys":["agrp","class","klbl","labl","v_Data"],"inner_keys":[]}]}
 {"op":"diag-sharing","rid":30}
-  -> {"rid":30,"report":{"container":"com.apple.security.shared.keychain","databases":{
-      "private":{"zones":3,"other_zone_names":["_defaultZone"],"groups":[{"group":1,
-      "owned_by_you":true,"records":12,"types":{"item":11,"cloudkit.share":1},"fields":[...]}]},
-      "shared":{"zones":4,"other_zone_names":[],"groups":[...]}}}}
-{"op":"diag-sharing-decrypt","rid":31}
-  -> {"rid":31,"report":{"container":"com.apple.security.shared.keychain","mode":"decrypt",
+  -> {"rid":30,"report":{"container":"com.apple.security.shared.keychain","mode":"decrypt",
       "keychain":{"items":412,"undecryptable":0,"pcs_keys":3},"groups_owned":6,
       "groups":[{"group":1,"paging":{"pages":2,"statuses":{"1":1,"3":1},"complete":true,
       "changes_without_record":0},"records":5,"items":4,"decrypted":4,"failed":{},
@@ -623,19 +618,12 @@ the next grant; `idle_lock_s` restarts the idle clock.
   categories are turned on.
 - `diag-sharing`: needs tier 1, a signed-in account, raises `.manage`; `busy-sync` while a
   sync, sign-in or edit runs. **Read-only**: runs `OctagonClient.probe_sharing` (section
-  "Shared groups"), which sends only op 203 (list a database's zones) and op 213 (a zone's
-  records, the fetch every sync makes) to the shared-keychain container, in the private and
-  the shared database. No save, no delete, nothing decrypted, no sync token kept, nothing
-  reaches the vault. The report is zone and group counts, whether each group is yours, and
-  record types, counts and field names per group: **never a value or a group id**.
-- `diag-sharing-decrypt`: the same gates as `diag-sharing` (tier 1, signed in, `.manage`,
-  `busy-sync`). **Read-only**: runs `OctagonClient.probe_sharing_decrypt` (section "Shared
-  groups"). It reads the Protected Cloud Storage service keys out of the keychain, in memory, with
+  "Shared groups"). It reads the Protected Cloud Storage service keys out of the keychain, in memory, with
   the fetches a normal sync makes (fetchRecoverableTLKShares and the CKKS record fetches), then
   sends to the shared-keychain container, in the private database only (groups you own), op 203
   (zones), op 201 (a zone's protection info) and op 213 (its records). Never op 200, 202 or 210,
   no Octagon join, establish or trust update, nothing applied to the vault, no sync token kept; the
-  only store write is the refreshed session, as `diag-sharing` keeps it. Decrypted keys and values
+  only store write is the refreshed session, as a sync keeps it. Decrypted keys and values
   stay in that call's memory. The report is counts per group and in `totals`: record types, items,
   how many decrypted and how many failed (by stage and exception class name), whether the key was
   found, the zone opened and the group name readable (booleans), the payload kinds (top-level
@@ -979,7 +967,6 @@ traceback.
 | `features` | ui | `.manage` | – (a change only) | `{features}` |
 | `diag-items` | ui | `.manage` | tier 1 | `{available, items}` |
 | `diag-sharing` | ui | `.manage` | tier 1, signed in | `{report}` |
-| `diag-sharing-decrypt` | ui | `.manage` | tier 1, signed in | `{report}` |
 | `redeem` | clip | – | ticket at hello | `{value, sensitive, timeout}` |
 | `clip-result` | clip | – | after redeem | `{ok:true}` |
 | `import-file` | migrate | – | purpose import | `{ok, size?, sha256?}` |
@@ -990,12 +977,12 @@ traceback.
 | `autofill-names` | autofill | `.autofill-names` | tier 1 (a site not yet named) | `{state, host?, accounts?}` |
 | `autofill-fill` | autofill | `.autofill` | tier 1 | `{id, username, password, code?}` |
 
-## 14. Shared password groups (not synced yet)
+## 14. Shared password groups
 
-Passwords in an Apple Passwords shared group (iOS 17 / macOS 14) are not in the CKKS keychain zones this client syncs, so they are absent from the vault. They live in their own CloudKit container, `com.apple.security.shared.keychain` (bundle `com.apple.security.kcsharing`), one zone per group named `group-<UUID>`: groups you created in your private database (header `targetDatabase` 1), groups you joined in your shared database (3; 2 is the public database). Each zone's records are an `item` per password and one `cloudkit.share`, encrypted with keys carried in the zone's PCS protection info (Sank6/iCloud-Keychain-for-Linux, MIT, RESEARCH.md, documents and implements the owned-group path).
+Passwords in an Apple Passwords shared group (iOS 17 / macOS 14) are not in the CKKS keychain zones. They live in their own CloudKit container, `com.apple.security.shared.keychain` (bundle `com.apple.security.kcsharing`), one zone per group named `group-<UUID>`: groups you created in your private database (header `targetDatabase` 1), groups you joined in your shared database (3; 2 is the public database). Each zone holds an `item` per keychain item (a password and its Apple Passwords sidecar, as in the own keychain) and one `cloudkit.share` naming the group, encrypted with keys carried in the zone's PCS protection info. The PCS code in `backend/icp/sharing/` is ported from Sank6/iCloud-Keychain-for-Linux (MIT, credited in LICENSE).
 
-`OctagonClient.probe_sharing` is a read-only diagnostic, never used by sync: ckAppInit for the container, then op 203 (ZoneRetrieveChanges) in each database and op 213 (RecordRetrieveChanges) per group zone. It reports counts, record types and field names only, never a value or a zone's UUID. Nothing is written to iCloud and nothing reaches the vault.
+Sync reads the groups you own, read-only: after the keychain fetch it takes the PCS service keys (keychain items whose access group starts with `com.apple.ProtectedCloudStorage`, `acct` the base64 public X coordinate, `v_Data` the private key) out of the records it already fetched, in memory, and sends only op 203 (zones of the private database), op 201 (ZoneRetrieve, a zone's protection info) and op 213 (its records) to the sharing container. Never a save or a delete. The items go through the same pairing and grouping as own items, one group at a time, into entries in their own id namespace (`sh1-`) carrying `shared_group` (section 3.1); they are read-only (`shared-read-only`). Only a fetch in which every group, page and item succeeded is applied (`UserStore.apply_shared_sync`); anything less leaves the shared entries exactly as they were, and the own keychain's sync never adds or removes a shared entry.
 
-`OctagonClient.probe_sharing_decrypt` (op `diag-sharing-decrypt`) is the next read-only step, for groups you own: it sends only op 203 (zones of the private database), op 201 (ZoneRetrieve, the zone's PCS protection info) and op 213 (records) to the sharing container, after reading the PCS service keys (keychain items whose access group starts with `com.apple.ProtectedCloudStorage`, `acct` the base64 public X coordinate, `v_Data` the private key) out of the keychain in memory. A normal sync decrypts those items and then drops them, so the diagnostic re-runs the unwrap chain over the records a sync fetches and keeps only those items; what a sync stores is unchanged. The PCS code in `backend/icp/sharing/` is ported from Sank6/iCloud-Keychain-for-Linux (MIT, credited in LICENSE). It reports counts only, and no group is written to the vault yet.
+`diag-sharing` runs the same reads and reports counts only (records, types, decrypt results, paging), never a value, name or id.
 
-Live experiment: run the probe on an account with one owned and one joined group and read the debug log. A non-error shared-zone entry naming record types (`item`, `synckey`, `tlkshare`, share records) reveals the zone layout and the database enum. Only then write decryption, against a captured sample.
+Joined groups (zones in the shared database) are not read yet: opening them needs the participant's path through the share record, which neither this client nor the reference implements.

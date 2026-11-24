@@ -20,11 +20,11 @@ MouseArea {
     id: k
     required property Flickable flickable
 
-    // GTK 4's constants, so a flick here travels like one in a GTK app beside it.
     // How far content moves per touchpad pixel. Qt applies Hyprland's touchpad scroll_factor
     // (0.4 on Omarchy, often lower) to the deltas as they are, so at 1 the content crawls well
     // behind the fingers. The glide follows, since its speed is measured from these moves.
     readonly property real speed: 3
+    // GTK 4's constants, so a flick here travels like one in a GTK app beside it.
     readonly property real friction: 4        // DECELERATION_FRICTION, per second
     readonly property int captureMs: 150      // SCROLL_CAPTURE_THRESHOLD_MS
     readonly property real minFlick: 50       // px/s: slower than this when the fingers lift is a stop
@@ -38,36 +38,34 @@ MouseArea {
 
     readonly property bool gliding: glide.running
     property bool gesture: false              // inside a touchpad gesture (saw its ScrollBegin)
-    property var samples: []                  // [{t, dx, dy}] of the current gesture
+    // [{t, dx, dy}] of the gesture's last captureMs, trimmed from the front and changed in
+    // place: one small array per gesture, not one per event.
+    property var samples: []
     property real vx: 0
     property real vy: 0
     property real lastX: 0
     property real lastY: 0
 
-    function minX() { return flickable.originX - flickable.leftMargin; }
-    function maxX() { return Math.max(minX(), flickable.originX + flickable.contentWidth
-                                              + flickable.rightMargin - flickable.width); }
-    function minY() { return flickable.originY - flickable.topMargin; }
-    function maxY() { return Math.max(minY(), flickable.originY + flickable.contentHeight
-                                              + flickable.bottomMargin - flickable.height); }
-    function canX() { return flickable.flickableDirection !== Flickable.VerticalFlick && maxX() > minX() + 0.5; }
-    function canY() { return flickable.flickableDirection !== Flickable.HorizontalFlick && maxY() > minY() + 0.5; }
+    // The scrollable range, read once per event or frame. can* is false for an axis that has
+    // nowhere to go or that the Flickable does not scroll.
+    function bounds() {
+        const f = flickable;
+        const x0 = f.originX - f.leftMargin, y0 = f.originY - f.topMargin;
+        const x1 = Math.max(x0, f.originX + f.contentWidth + f.rightMargin - f.width);
+        const y1 = Math.max(y0, f.originY + f.contentHeight + f.bottomMargin - f.height);
+        return { x0: x0, x1: x1, y0: y0, y1: y1,
+                 canX: f.flickableDirection !== Flickable.VerticalFlick && x1 > x0 + 0.5,
+                 canY: f.flickableDirection !== Flickable.HorizontalFlick && y1 > y0 + 0.5 };
+    }
     function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+    function trim(t) { while (samples.length && samples[0].t < t - captureMs) samples.shift(); }
 
     function stop() {
         if (!glide.running) return;
         glide.stop();
         // Rest on whole pixels, so text is not left blurred between two.
-        if (canY()) flickable.contentY = Math.round(flickable.contentY);
-        if (canX()) flickable.contentX = Math.round(flickable.contentX);
-    }
-
-    // Move by a touchpad delta, in Qt's sign (the same one Flickable uses: content -= delta).
-    function moveBy(dx, dy) {
-        if (canX() && dx) flickable.contentX = clamp(flickable.contentX - dx, minX(), maxX());
-        if (canY() && dy) flickable.contentY = clamp(flickable.contentY - dy, minY(), maxY());
-        lastX = flickable.contentX;
-        lastY = flickable.contentY;
+        flickable.contentX = Math.round(flickable.contentX);
+        flickable.contentY = Math.round(flickable.contentY);
     }
 
     // One touchpad event. Returns whether it was taken. `t` is in ms. Split out of onWheel so a
@@ -77,33 +75,35 @@ MouseArea {
             stop();
             flickable.cancelFlick();
             gesture = true;
-            samples = [];
+            samples.length = 0;
         } else if (!gesture || (phase !== Qt.ScrollUpdate && phase !== Qt.ScrollEnd)) {
             return false;                                 // a mouse wheel: Qt's own handling
         }
-        if (!canX() && !canY()) {
+        const b = bounds();
+        if (!b.canX && !b.canY) {
             if (phase === Qt.ScrollEnd) gesture = false;
             return false;                                 // nothing to scroll here: let it through
         }
         dx *= speed;
         dy *= speed;
+        trim(t);
         if (dx || dy) {
             stop();
-            moveBy(dx, dy);
-            const s = samples.filter(function (p) { return p.t >= t - captureMs; });
-            s.push({ t: t, dx: dx, dy: dy });
-            samples = s;
+            // Qt's sign, the one Flickable uses: content -= delta.
+            if (b.canX && dx) flickable.contentX = clamp(flickable.contentX - dx, b.x0, b.x1);
+            if (b.canY && dy) flickable.contentY = clamp(flickable.contentY - dy, b.y0, b.y1);
+            samples.push({ t: t, dx: dx, dy: dy });
         }
         if (phase === Qt.ScrollEnd) {
             gesture = false;
-            const recent = samples.filter(function (p) { return p.t >= t - captureMs; });
-            samples = [];
-            if (recent.length < 2) return true;           // a nudge, or fingers that paused first
-            const span = Math.max(8, t - recent[0].t) / 1000;
+            const n = samples.length;
+            if (n < 2) { samples.length = 0; return true; }   // a nudge, or fingers that paused first
+            const span = Math.max(8, t - samples[0].t) / 1000;
             let sx = 0, sy = 0;
-            recent.forEach(function (p) { sx += p.dx; sy += p.dy; });
-            vx = canX() ? -sx / span : 0;
-            vy = canY() ? -sy / span : 0;
+            for (let i = 0; i < n; ++i) { sx += samples[i].dx; sy += samples[i].dy; }
+            samples.length = 0;
+            vx = b.canX ? -sx / span : 0;
+            vy = b.canY ? -sy / span : 0;
             if (Math.hypot(vx, vy) >= minFlick) {
                 lastX = flickable.contentX;
                 lastY = flickable.contentY;
@@ -134,14 +134,15 @@ MouseArea {
             const dt = Math.min(0.05, frameTime);
             const decay = Math.exp(-k.friction * dt);
             const step = (1 - decay) / k.friction;        // exact integral of v over dt
-            const nx = k.clamp(f.contentX + k.vx * step, k.minX(), k.maxX());
-            const ny = k.clamp(f.contentY + k.vy * step, k.minY(), k.maxY());
+            const b = k.bounds();
+            const nx = k.clamp(f.contentX + k.vx * step, b.x0, b.x1);
+            const ny = k.clamp(f.contentY + k.vy * step, b.y0, b.y1);
             if (k.vx) f.contentX = nx;
             if (k.vy) f.contentY = ny;
             k.lastX = f.contentX;
             k.lastY = f.contentY;
-            k.vx = (nx <= k.minX() || nx >= k.maxX()) ? 0 : k.vx * decay;
-            k.vy = (ny <= k.minY() || ny >= k.maxY()) ? 0 : k.vy * decay;
+            k.vx = (nx <= b.x0 || nx >= b.x1) ? 0 : k.vx * decay;
+            k.vy = (ny <= b.y0 || ny >= b.y1) ? 0 : k.vy * decay;
             if (Math.hypot(k.vx, k.vy) < k.stopBelow) k.stop();
         }
     }

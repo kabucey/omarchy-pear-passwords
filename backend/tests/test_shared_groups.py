@@ -27,11 +27,11 @@ from icp import vstore
 from icp.daemon import apple, autofill
 from icp.daemon.context import UserContext
 from icp.octagon import client as octagon, items as sync_items, shared
-from icp.sharing import fetch as sharing_fetch
+from icp.sharing import fetch as sharing_fetch, pcs
 from icp.vault.host import Credential
 from icp.vstore import ids
 
-from icp.sharing import diagnose, groups
+from icp.sharing import groups
 from icp.keychain import pipeline
 
 ZONE = base.GROUP_UUID
@@ -186,7 +186,7 @@ class SyncPathTests(base.DiagnosticOpsTests):
         self.assertEqual(self.client.shared.items, [])
 
     def test_a_failing_key_extraction_never_breaks_the_own_sync(self):
-        with mock.patch.object(diagnose, "pcs_keys_from_records", side_effect=RuntimeError("x")):
+        with mock.patch.object(pcs, "pcs_keys_from_records", side_effect=RuntimeError("x")):
             items = self.client.sync_and_decrypt()
         self.assertEqual(list(items), [])
         self.assertFalse(self.client.shared.complete)

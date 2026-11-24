@@ -61,6 +61,9 @@ class FakeStore:
     def list_meta(self) -> list[Meta]:
         return list(self.metas.values())
 
+    def count_shared(self) -> int:
+        return sum(1 for m in self.metas.values() if m.shared_group)
+
     def get_meta(self, id: str) -> Meta:
         try:
             return self.metas[id]

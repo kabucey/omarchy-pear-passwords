@@ -336,13 +336,6 @@ class FakeApple:
 
     def probe_sharing(self, ctx):
         self.calls.append("probe_sharing")
-        return {"private_zones": {"Passwords": {"records": 2, "types": {"item": 2},
-                                                "fields": ["data", "uuid"]}},
-                "shared": {"Passwords@db2": {"error": {"type": "CloudKitError", "code": 26,
-                                                       "description": "zone not found"}}}}
-
-    def probe_sharing_decrypt(self, ctx):
-        self.calls.append("probe_sharing_decrypt")
         return {"mode": "decrypt", "groups": [], "totals": {"items": 0}}
 
     def signout(self, ctx):

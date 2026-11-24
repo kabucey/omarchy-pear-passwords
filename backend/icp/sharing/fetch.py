@@ -22,8 +22,7 @@ import logging
 import time
 
 from ..proto.codec import decode_fields, first_str
-from ..transport import cloudkit
-from . import groups, pcs
+from . import bump, groups, pcs
 
 log = logging.getLogger(__name__)
 
@@ -47,22 +46,16 @@ class Fetch:
     stats: dict = dataclasses.field(default_factory=dict)   # counts only
 
 
-def _bump(counter: dict, key: str, n: int = 1) -> None:
-    counter[key] = counter.get(key, 0) + n
-
-
 def _fail(out: Fetch, where: str, exc: BaseException) -> Fetch:
-    _bump(out.stats.setdefault("failed", {}), f"{where}:{type(exc).__name__}")
+    bump(out.stats.setdefault("failed", {}), f"{where}:{type(exc).__name__}")
     out.complete = False
     return out
 
 
 def _read_group(transport, z: dict, keys: dict, stats: dict) -> Group:
     """One group's items, or an exception (its class is what the caller reports)."""
-    prot = groups.fetch_zone_protection(transport, z["raw"], database=cloudkit.DB_PRIVATE,
-                                        scope="Private")
-    records, paging = groups.fetch_records(transport, z["raw"], database=cloudkit.DB_PRIVATE,
-                                           scope="Private")
+    prot = groups.fetch_zone_protection(transport, z["raw"])
+    records, paging = groups.fetch_records(transport, z["raw"])
     if not paging["complete"]:
         raise pcs.PCSError("incomplete")
     idents, default_keys = groups.open_zone(prot, keys)
@@ -76,11 +69,11 @@ def _read_group(transport, z: dict, keys: dict, stats: dict) -> Group:
                                              groups.record_keys(rec, idents, default_keys, cache))
                 group.name = first_str(decode_fields(plain), 6, "") if plain else ""
             except Exception:  # noqa: BLE001 - the name is a label; the group still opens
-                _bump(stats, "name_unreadable")
+                bump(stats, "name_unreadable")
             continue
         if rtype != "item":
             continue
-        _bump(stats, "items")
+        bump(stats, "items")
         if not rec["fields"].get("payload", (None, None))[0]:
             raise pcs.PCSError("item without a payload")
         plain = groups.decrypt_field(rec, z["name"], "payload",
@@ -88,7 +81,7 @@ def _read_group(transport, z: dict, keys: dict, stats: dict) -> Group:
         item = groups.sharing_item_to_keychain(plain)
         if item is None:
             kinds = "+".join(str(k) for k in sorted(decode_fields(plain))) or "empty"
-            _bump(stats.setdefault("skipped_kinds", {}), kinds)
+            bump(stats.setdefault("skipped_kinds", {}), kinds)
             continue
         item["class"] = KEYCHAIN_CLASS
         group.items.append(item)
@@ -104,7 +97,7 @@ def fetch_owned_groups(transport, kc_user: str, keychain_keys: dict[bytes, bytes
         zones = groups.list_zones(transport)
     except Exception as e:  # noqa: BLE001
         return _fail(out, "zones", e)
-    owned = [z for z in zones if z.get("owner") in ("", kc_user, "__defaultOwner__")]
+    owned = [z for z in zones if groups.is_owned(z, kc_user)]
     out.stats["groups"] = len(owned)
     for i, z in enumerate(owned):
         if i:

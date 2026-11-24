@@ -318,37 +318,32 @@ class CloudKitTransport:
             ckks.FIELD_RECORD_SAVE, save_request_bytes, bundle=SECURITYD_BUNDLE)
         return result.field(ckks.FIELD_RECORD_SAVE) or b""
 
-    def fetch_records(self, zone_request_bytes: bytes) -> bytes:
-        """LIVE record fetch (RecordRetrieveChanges) -> retrieveChangesResponse(213) bytes."""
-        result = self._perform(
-            CKDATABASE_SYNC_URL, ckks.OP_TYPE_RECORD_RETRIEVE_CHANGES,
-            ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=SECURITYD_BUNDLE)
-        return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""
-
-    def probe_zone_changes(self, continuation: bytes | None, *, bundle: str, database: int,
-                           scope: str) -> bytes:
-        """LIVE, READ-ONLY, DIAGNOSTIC. ZoneRetrieveChanges (op 203): the zones in a database.
-        Never used by sync."""
-        req = Writer().bytes(1, continuation).finish()
-        result = self._perform(
-            CKDATABASE_ZONE_SYNC_URL, OP_TYPE_ZONE_RETRIEVE_CHANGES,
-            FIELD_ZONE_RETRIEVE_CHANGES, req, bundle=bundle, database=database, scope=scope)
-        return result.field(FIELD_ZONE_RETRIEVE_CHANGES) or b""
-
-    def probe_records(self, zone_request_bytes: bytes, *, bundle: str, database: int,
-                      scope: str) -> bytes:
-        """LIVE, READ-ONLY, DIAGNOSTIC. RecordRetrieveChanges (op 213, the fetch every sync
-        makes) in any database and bundle. Never used by sync."""
+    def fetch_records(self, zone_request_bytes: bytes, *, bundle: str = SECURITYD_BUNDLE,
+                      database: int = DB_PRIVATE, scope: str = "Private") -> bytes:
+        """LIVE, READ-ONLY. RecordRetrieveChanges (op 213) -> retrieveChangesResponse(213)
+        bytes. Defaults are the keychain sync's; the shared-groups fetch passes its own bundle
+        and database."""
         result = self._perform(
             CKDATABASE_SYNC_URL, ckks.OP_TYPE_RECORD_RETRIEVE_CHANGES,
             ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=bundle,
             database=database, scope=scope)
         return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""
 
-    def probe_zone_retrieve(self, zone_identifier: bytes, *, bundle: str, database: int,
-                            scope: str) -> bytes:
-        """LIVE, READ-ONLY, DIAGNOSTIC. ZoneRetrieve (op 201): one zone's details, including the
-        PCS protection info the shared-group diagnostic opens. Never used by sync."""
+    def fetch_zone_changes(self, continuation: bytes | None, *, bundle: str, database: int,
+                           scope: str) -> bytes:
+        """LIVE, READ-ONLY. ZoneRetrieveChanges (op 203): the zones in a database. Used by the
+        shared-groups sync and its diagnostic."""
+        req = Writer().bytes(1, continuation).finish()
+        result = self._perform(
+            CKDATABASE_ZONE_SYNC_URL, OP_TYPE_ZONE_RETRIEVE_CHANGES,
+            FIELD_ZONE_RETRIEVE_CHANGES, req, bundle=bundle, database=database, scope=scope)
+        return result.field(FIELD_ZONE_RETRIEVE_CHANGES) or b""
+
+    def fetch_zone(self, zone_identifier: bytes, *, bundle: str, database: int,
+                   scope: str) -> bytes:
+        """LIVE, READ-ONLY. ZoneRetrieve (op 201): one zone's details, including the PCS
+        protection info the shared-groups fetch opens. Used by the shared-groups sync and
+        its diagnostic."""
         req = Writer().bytes(1, zone_identifier).finish()
         result = self._perform(
             CKDATABASE_ZONE_RETRIEVE_URL, OP_TYPE_ZONE_RETRIEVE, FIELD_ZONE_RETRIEVE, req,

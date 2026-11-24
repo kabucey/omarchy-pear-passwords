@@ -48,7 +48,7 @@ class SharedReadOnly(AppleError):
 
 
 def refuse_shared(meta) -> None:
-    if getattr(meta, "shared_group", ""):
+    if meta.is_shared:
         raise SharedReadOnly("a shared-group entry is read-only")
 
 
@@ -123,8 +123,8 @@ def _deleted(store, items: list, failed_zones: list) -> set:
         return set()
     # Shared-group entries are the shared fetch's to remove, never this one's: this fetch
     # does not return them, so every one of them would look deleted.
-    known = {m.id for m in store.list_meta() if not getattr(m, "shared_group", "")}
-    gone = {i for i in known - present if not is_shared_id(i)}
+    known = {m.id for m in store.list_meta() if not is_shared_id(m.id)}
+    gone = known - present
     if gone and not present:
         logger.warning("not applying deletions: the keychain returned no entries at all")
         return set()
@@ -177,14 +177,14 @@ def _apply_shared(ctx: "UserContext", res) -> dict:
     store = ctx.store
     out = {"attempted": res is not None, "complete": False, "total": 0}
     try:
-        out["total"] = sum(1 for m in store.list_meta() if getattr(m, "shared_group", ""))
         if res is None or not getattr(res, "complete", False):
+            out["total"] = store.count_shared()
             if res is not None:
                 logger.warning("shared groups not updated: %s", getattr(res, "stats", {}))
             return out
         counts = store.apply_shared_sync(res.items)
         out.update(complete=True, **{k: int(v) for k, v in counts.items()})
-        out["total"] = sum(1 for m in store.list_meta() if getattr(m, "shared_group", ""))
+        out["total"] = store.count_shared()
         logger.info("shared groups: %d entries (added %d, changed %d, deleted %d)",
                     out["total"], counts["added"], counts["changed"], counts["deleted"])
     except Exception as e:  # noqa: BLE001 - the shared part must not fail the own sync
@@ -222,26 +222,9 @@ def sync(ctx: "UserContext") -> dict:
 
 
 def probe_sharing(ctx: "UserContext") -> dict:
-    """READ-ONLY: what iCloud answers for the zones where Apple Passwords shared groups may
-    live (OctagonClient.probe_sharing). Only RecordRetrieveChanges is sent, the same fetch a
-    sync makes; the report is record types, counts, field names and error codes, never a value,
-    and nothing here touches the vault or saves a sync token."""
-    from ..octagon import client as octagon
-
-    s = _session(ctx)
-    device, anisette = _device(ctx)
-    _still_unlocked(ctx)
-    _fresh_tokens(ctx, s, device, anisette)
-    client = octagon.OctagonClient(s, device, anisette)
-    session_store.save(ctx.store, s)   # the refreshed cloudKitToken, exactly as a sync keeps it
-    _still_unlocked(ctx)
-    return client.probe_sharing()
-
-
-def probe_sharing_decrypt(ctx: "UserContext") -> dict:
     """READ-ONLY: decrypt the Apple Passwords shared groups you own and report counts only
-    (OctagonClient.probe_sharing_decrypt). Only fetches are sent; the only store write is the
-    refreshed session, exactly as probe_sharing keeps it. The decrypted keys and values stay in
+    (OctagonClient.probe_sharing). Only fetches are sent; the only store write is the
+    refreshed session, exactly as a sync keeps it. The decrypted keys and values stay in
     that call's memory; nothing is applied to the vault, no sync token is saved, and the
     report holds counts, never a value, name or id."""
     from ..octagon import client as octagon
@@ -253,7 +236,7 @@ def probe_sharing_decrypt(ctx: "UserContext") -> dict:
     client = octagon.OctagonClient(s, device, anisette)
     session_store.save(ctx.store, s)   # the refreshed cloudKitToken, exactly as a sync keeps it
     _still_unlocked(ctx)
-    return client.probe_sharing_decrypt()
+    return client.probe_sharing()
 
 
 # --------------------------------------------------------------------------- sign-in

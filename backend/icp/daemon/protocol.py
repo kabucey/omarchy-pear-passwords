@@ -93,7 +93,6 @@ ROLE_OPS: dict[str, frozenset[str]] = {
         "migrate-begin", "migrate-abandon", "reset", "purge-old-copy", "clip-history-check",
         "cancel", "tpm-move",
         "autofill-enable", "copy-text", "features", "diag-items", "diag-sharing",
-        "diag-sharing-decrypt",
     }),
     "clip": frozenset({"redeem", "clip-result"}),
     "migrate": frozenset({"import-file", "import-key", "import-commit", "purge-result"}),
@@ -117,7 +116,6 @@ PROMPT_ACTION: dict[str, str] = {
     "features": paths.ACTION_MANAGE,             # changing a flag only; reading never asks
     "diag-items": paths.ACTION_MANAGE,
     "diag-sharing": paths.ACTION_MANAGE,
-    "diag-sharing-decrypt": paths.ACTION_MANAGE,
     "autofill-fill": paths.ACTION_AUTOFILL,
     "autofill-names": paths.ACTION_AUTOFILL_NAMES,   # only when this site is not yet named
 }
