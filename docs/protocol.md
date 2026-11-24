@@ -261,7 +261,7 @@ lease: a locked uid does not sync.
 | action | message | raised by |
 |---|---|---|
 | `io.github.dragosol.pearpasswords.unlock` | Unlock Pear Passwords to show your accounts | `unlock` |
-| `io.github.dragosol.pearpasswords.manage` | Change Pear Passwords on this computer | `create`, `delete`, `signin`, `signout`, `migrate-begin`, `reset`, `purge-old-copy`, `clip-history-check`, `autofill-enable`, `tpm-move`, `features` (a change), `diag-items` |
+| `io.github.dragosol.pearpasswords.manage` | Change Pear Passwords on this computer | `create`, `delete`, `signin`, `signout`, `migrate-begin`, `reset`, `purge-old-copy`, `clip-history-check`, `autofill-enable`, `tpm-move`, `features` (a change), `diag-items`, `diag-sharing` |
 | `io.github.dragosol.pearpasswords.autofill` | A browser extension asks to fill the password for $(account) on $(origin) | `autofill-fill` |
 | `io.github.dragosol.pearpasswords.autofill-names` | A browser extension asks to see which accounts you have saved for $(origin) | `autofill-names` (only for a site not yet named) |
 
@@ -575,7 +575,7 @@ the next grant; `idle_lock_s` restarts the idle clock.
   newest first, up to about 56 KB. Compares pwmac only (no entry key); `matches` are indexes into `items`.
   Values are never logged.
 
-### 6.10 features, diag-items
+### 6.10 features, diag-items, diag-sharing
 
 ```json
 {"op":"features","rid":28,"get":true}      -> {"rid":28,"features":{"passkeys":false,"apple_deleted":false}}
@@ -583,6 +583,10 @@ the next grant; `idle_lock_s` restarts the idle clock.
 {"op":"diag-items","rid":29}
   -> {"rid":29,"available":true,"items":[{"class":"keys","agrp":"com.apple.webkit.webauthn",
       "count":22,"keys":["agrp","class","klbl","labl","v_Data"],"inner_keys":[]}]}
+{"op":"diag-sharing","rid":30}
+  -> {"rid":30,"report":{"private_zones":{"Passwords":{"records":512,"types":{"item":512},
+      "fields":["data","uuid"]}},"shared":{"Passwords@db2":{"error":{"type":"CloudKitError",
+      "code":26,"description":"..."}}}}}
 ```
 
 - `features`: the categories that wait for a check on a real keychain, `passkeys` and
@@ -597,6 +601,13 @@ the next grant; `idle_lock_s` restarts the idle clock.
   with no items before the first sync after an unlock; a lock forgets it. It exists to
   confirm the passkey and Recently Deleted names on the owner's keychain once, before those
   categories are turned on.
+- `diag-sharing`: needs tier 1, a signed-in account, raises `.manage`; `busy-sync` while a
+  sync, sign-in or edit runs. **Read-only**: runs `OctagonClient.probe_sharing` (section
+  "Shared groups"), which sends only RecordRetrieveChanges, the fetch every sync makes, for
+  candidate zone names in the private database and in the shared database scope. No save,
+  no delete, no sync token kept, nothing reaches the vault. The report is record types,
+  counts, field names and error codes per zone, **never a value**. It exists to find where
+  Apple Passwords shared groups live on the owner's account.
 
 ## 7. clip ops (role `clip`)
 
@@ -932,6 +943,7 @@ traceback.
 | `copy-text` | ui | – | tier 1; grant for notes-edit, totp-setup-edit, new-password | `{ticket, ttl:10}` |
 | `features` | ui | `.manage` | – (a change only) | `{features}` |
 | `diag-items` | ui | `.manage` | tier 1 | `{available, items}` |
+| `diag-sharing` | ui | `.manage` | tier 1, signed in | `{report}` |
 | `redeem` | clip | – | ticket at hello | `{value, sensitive, timeout}` |
 | `clip-result` | clip | – | after redeem | `{ok:true}` |
 | `import-file` | migrate | – | purpose import | `{ok, size?, sha256?}` |

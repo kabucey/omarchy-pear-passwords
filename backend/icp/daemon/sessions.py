@@ -125,7 +125,7 @@ class Session:
         self.show_all = False              # unlock{all:true}
         self.grant_serial = 0              # invalidates an entry read on release/new grant
         self.epoch = 0                     # bumped by every lock
-        self.busy: str | None = None       # "sync" | "signin" | "edit" while Apple work runs
+        self.busy: str | None = None       # "sync" | "signin" | "edit" | "probe" while Apple work runs
         self.signin = None                 # the live SocketFrontend
         self.migrating = False             # migrate-begin made a store, import not committed
         self.autofill_enabled = False      # turned on in the window, behind .manage (persisted)

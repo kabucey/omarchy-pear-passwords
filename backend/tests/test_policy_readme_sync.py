@@ -74,6 +74,7 @@ class PolicyReadmeSyncTests(unittest.TestCase):
             "features": (paths.ACTION_MANAGE, "turning a category that waits for a check "
                                               "(Passkeys, Recently Deleted) on or off"),
             "diag-items": (paths.ACTION_MANAGE, "reading the keychain diagnostic"),
+            "diag-sharing": (paths.ACTION_MANAGE, "checking where shared groups live"),
             "autofill-fill": (paths.ACTION_AUTOFILL, "Every browser fill"),
             "autofill-names": (paths.ACTION_AUTOFILL_NAMES, "name a site's accounts"),
         }

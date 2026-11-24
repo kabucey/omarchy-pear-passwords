@@ -1541,6 +1541,36 @@ ShellRoot {
             }).join("\n");
         });
     }
+    // Where Apple Passwords shared groups live: what iCloud answered for each candidate zone,
+    // as record types, counts, field names and error codes (diag-sharing; read-only, never a
+    // value). Shown in the same box as the keychain check, selectable to paste into a report.
+    function runSharingProbe() {
+        root.diagBusy = true;
+        root.diagText = "";
+        root.send("diag-sharing", {}, function (d) {
+            root.diagBusy = false;
+            if (d.error) { root.diagText = root.errorWords(d); return; }
+            const rep = d.report || {};
+            const lines = [];
+            const show = function (scope, zones) {
+                Object.keys(zones || {}).sort().forEach(function (z) {
+                    const v = zones[z] || {};
+                    if (v.error) {
+                        lines.push(scope + "  " + z + "  error " + (v.error.code === null ? "" : v.error.code)
+                                   + " " + (v.error.type || "") + ": " + (v.error.description || ""));
+                        return;
+                    }
+                    const types = Object.keys(v.types || {}).map(function (t) { return v.types[t] + " × " + t; });
+                    lines.push(scope + "  " + z + "  " + (v.records || 0) + " records"
+                               + (types.length ? "  (" + types.join(", ") + ")" : ""));
+                    if ((v.fields || []).length) lines.push("    fields: " + v.fields.join(", "));
+                });
+            };
+            show("private", rep.private_zones);
+            show("shared ", rep.shared);
+            root.diagText = lines.length ? lines.join("\n") : "iCloud returned nothing for any candidate zone.";
+        });
+    }
     onSettingsOpenChanged: if (root.settingsOpen && root.phase === "ready") root.loadFeatures()
 
     FileView {
@@ -5384,13 +5414,24 @@ ShellRoot {
                             }
                         }
                     }
-                    AppButton {
+                    RowLayout {
                         Layout.topMargin: 8
                         visible: root.appUnlocked
-                        text: root.diagBusy ? "Checking…" : "Check the keychain's item names"
-                        enabled: !root.diagBusy
-                        fontSize: Theme.fSmall
-                        onClicked: root.runDiag()
+                        spacing: 8
+                        AppButton {
+                            text: root.diagBusy ? "Checking…" : "Check the keychain's item names"
+                            enabled: !root.diagBusy
+                            fontSize: Theme.fSmall
+                            onClicked: root.runDiag()
+                        }
+                        // Read-only: asks iCloud where shared password groups live (diag-sharing).
+                        AppButton {
+                            visible: root.signedIn
+                            text: root.diagBusy ? "Checking…" : "Check shared groups"
+                            enabled: !root.diagBusy
+                            fontSize: Theme.fSmall
+                            onClicked: root.runSharingProbe()
+                        }
                     }
                     Rectangle {
                         Layout.fillWidth: true

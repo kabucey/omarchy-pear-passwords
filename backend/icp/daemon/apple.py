@@ -166,6 +166,23 @@ def sync(ctx: "UserContext") -> dict:
     return result
 
 
+def probe_sharing(ctx: "UserContext") -> dict:
+    """READ-ONLY: what iCloud answers for the zones where Apple Passwords shared groups may
+    live (OctagonClient.probe_sharing). Only RecordRetrieveChanges is sent, the same fetch a
+    sync makes; the report is record types, counts, field names and error codes, never a value,
+    and nothing here touches the vault or saves a sync token."""
+    from ..octagon import client as octagon
+
+    s = _session(ctx)
+    device, anisette = _device(ctx)
+    _still_unlocked(ctx)
+    _fresh_tokens(ctx, s, device, anisette)
+    client = octagon.OctagonClient(s, device, anisette)
+    session_store.save(ctx.store, s)   # the refreshed cloudKitToken, exactly as a sync keeps it
+    _still_unlocked(ctx)
+    return client.probe_sharing()
+
+
 # --------------------------------------------------------------------------- sign-in
 
 def _signin(ctx: "UserContext", prior: dict) -> None:

@@ -906,6 +906,41 @@ class FeatureFlagTests(Base):
         self.assertEqual(autofill.match_rank("site1.example", self.st.metas["e.1"]), 0)
 
 
+class DiagSharingTests(Base):
+    """diag-sharing: the read-only shared-groups probe. Tier 1 and .manage, a signed-in
+    account, never alongside a sync, and only the probe runs (no sync, no push)."""
+
+    async def test_needs_tier1_manage_and_a_session(self):
+        r = await self.ui.call("diag-sharing")
+        self.assertEqual(r["error"], "locked")
+        self.assertEqual(self.dialogs(), [])
+        await self.h.unlock(self.ui)
+        self.st.save_session({})
+        self.assertEqual((await self.ui.call("diag-sharing"))["error"], "not-signed-in")
+        self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK, paths.ACTION_MANAGE])
+        self.h.authority.outcome = "dismissed"
+        self.assertEqual((await self.ui.call("diag-sharing"))["error"], "dismissed")
+        self.assertNotIn("probe_sharing", self.h.apple.calls)
+
+    async def test_returns_the_report_and_touches_nothing_else(self):
+        await self.h.unlock(self.ui)
+        self.st.save_session({"dsid": "fake"})
+        before = list(self.h.apple.calls)
+        r = await self.ui.call("diag-sharing")
+        self.assertIn("report", r)
+        self.assertEqual(r["report"]["private_zones"]["Passwords"]["types"], {"item": 2})
+        self.assertEqual(self.h.apple.calls[len(before):], ["probe_sharing"])
+        self.assertIsNone(next(iter(self.h.reg.sessions.values())).busy)
+
+    async def test_refused_while_apple_work_runs(self):
+        await self.h.unlock(self.ui)
+        self.st.save_session({"dsid": "fake"})
+        sess = next(iter(self.h.reg.sessions.values()))
+        sess.busy = "sync"
+        self.assertEqual((await self.ui.call("diag-sharing"))["error"], "busy-sync")
+        self.assertNotIn("probe_sharing", self.h.apple.calls)
+
+
 class DiagItemsTests(Base):
     SHAPE = {("keys", "com.apple.webkit.webauthn"):
              {"count": 3, "keys": {"agrp", "class", "klbl", "labl", "v_Data"},

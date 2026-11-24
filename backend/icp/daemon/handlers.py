@@ -1131,6 +1131,31 @@ async def op_diag_items(reg, conn, req):
     return {"available": True, "items": items}
 
 
+async def op_diag_sharing(reg, conn, req):
+    """READ-ONLY probe for Apple Passwords shared groups (apple.probe_sharing): asks iCloud
+    for the candidate shared zones with the one fetch sync already makes, and returns what it
+    answered as record types, counts, field names and error codes, never a value. Needs tier 1,
+    a signed-in account and raises .manage; refused while a sync or another Apple call runs."""
+    s = _tier1(reg, conn)
+    epoch = s.epoch
+    await reg.authorize(conn, paths.ACTION_MANAGE, {})
+    _still(s, conn, epoch)
+    st = await _store(reg, s.uid, s.store.status)
+    if not st.get("signed_in"):
+        raise OpError("not-signed-in")
+    if s.busy:
+        raise OpError("busy-sync")
+    s.busy = "probe"
+    try:
+        ctx = UserContext(s.uid, s.store, reg.anisette_url, None)
+        report = await _apple_call(reg, s, reg.apple.probe_sharing, ctx)
+    finally:
+        if s.busy == "probe":
+            s.busy = None
+    _still(s, conn, epoch)
+    return {"report": report}
+
+
 # --- ui: migration and cleanup ------------------------------------------------------------------
 
 async def _save_setting_keys(reg, s, **changes) -> None:
@@ -1549,5 +1574,5 @@ HANDLERS = {
     "autofill-query": op_autofill_query, "autofill-names": op_autofill_names,
     "autofill-fill": op_autofill_fill,
     "autofill-enable": op_autofill_enable,
-    "copy-text": op_copy_text, "features": op_features, "diag-items": op_diag_items,
+    "copy-text": op_copy_text, "features": op_features, "diag-items": op_diag_items, "diag-sharing": op_diag_sharing,
 }

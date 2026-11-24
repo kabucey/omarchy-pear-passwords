@@ -334,6 +334,13 @@ class FakeApple:
     def fetch_aliases(self, ctx):
         return 0
 
+    def probe_sharing(self, ctx):
+        self.calls.append("probe_sharing")
+        return {"private_zones": {"Passwords": {"records": 2, "types": {"item": 2},
+                                                "fields": ["data", "uuid"]}},
+                "shared": {"Passwords@db2": {"error": {"type": "CloudKitError", "code": 26,
+                                                       "description": "zone not found"}}}}
+
     def signout(self, ctx):
         self.calls.append("signout")
         ctx.store.save_session({})
