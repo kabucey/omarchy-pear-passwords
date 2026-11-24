@@ -941,3 +941,11 @@ traceback.
 | `autofill-query` | autofill | – | – | `{state, host?, accounts?}` |
 | `autofill-names` | autofill | `.autofill-names` | tier 1 (a site not yet named) | `{state, host?, accounts?}` |
 | `autofill-fill` | autofill | `.autofill` | tier 1 | `{id, username, password, code?}` |
+
+## 14. Shared password groups (not synced yet)
+
+Passwords in an Apple Passwords shared group (iOS 17 / macOS 14) are not in the private CKKS zones this client fetches (`ckks.KEYCHAIN_ZONES`), so they are absent from the vault. Keychain sharing is implemented by Apple's closed-source KCSharing (mach service `com.apple.security.kcsharing`); the public Security sources carry only a stub listener (`keychain/securityd/KCSharingStubXPCListenerDelegate.m`). Zone names, per-group key distribution and share record layout are unpublished and unverified here.
+
+`OctagonClient.probe_sharing` is a read-only diagnostic, never used by sync. It tries RecordRetrieveChanges against guessed zone names in the private database and, with `x-cloudkit-databasescope: Shared` and each candidate database enum value, in the shared database. It logs only record types, counts, field names and error codes via `diag`. Nothing is written to iCloud and nothing reaches the vault.
+
+Live experiment: run the probe on an account with one owned and one joined group and read the debug log. A non-error shared-zone entry naming record types (`item`, `synckey`, `tlkshare`, share records) reveals the zone layout and the database enum. Only then write decryption, against a captured sample.

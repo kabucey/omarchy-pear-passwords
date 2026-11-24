@@ -23,6 +23,10 @@ KEYCHAIN_ZONES = (
     "LimitedPeersAllowed", "SE-PTC", "Photos",
 )
 
+# Names worth probing for shared password groups. GUESSES: Apple's KCSharing is closed source
+# (only a stub XPC listener is in apple-oss-distributions/Security), so real names are unknown.
+SHARING_PROBE_ZONES = ("Passwords", "Sharing", "KCSharing", "SharedPasswords")
+
 CREDENTIAL_ZONES = frozenset(("Passwords", "Manatee"))
 
 ID_TYPE_RECORD = 1
@@ -46,6 +50,16 @@ VT_BYTES, VT_DATE, VT_STRING, VT_REFERENCE, VT_INT64, VT_DOUBLE = 1, 2, 3, 5, 7,
 # reverse-engineered from and is known to be accepted by Apple.
 SAVE_SEMANTICS_CREATE = 2
 SAVE_SEMANTICS_UPDATE = 3
+
+
+def summarize_records(records) -> dict:
+    """{record_type: count} plus field names seen: no values, safe to log."""
+    types: dict[str, int] = {}
+    names: set[str] = set()
+    for r in records:
+        types[r.type] = types.get(r.type, 0) + 1
+        names.update(r.fields)
+    return {"records": len(records), "types": types, "fields": sorted(names)}
 
 
 def _identifier(name: str, type_: int) -> bytes:
