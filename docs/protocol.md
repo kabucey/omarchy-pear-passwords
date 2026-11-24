@@ -159,11 +159,11 @@ with `state` one of `locked`, `unlocked`, `unavailable` only. `unavailable` cove
  "has_totp":true,"has_notes":false,"mdat":1791450000.0,"history_count":2,
  "primary":"GitHub","secondary":"me@example.com","no_site":false,"is_wifi":false,
  "ambiguous":false,"tags":["work","finance"],"has_passkey":false,"kind":"login",
- "has_password":true,"recently_deleted":false,
+ "has_password":true,"recently_deleted":false,"shared_group":"",
  "own_sites":["gist.github.com"],"members":["<opaque>"]}
 ```
 
-- The first twelve fields and the last five are `vstore.Meta`. `id` is opaque to clients: at
+- The first twelve fields and the last six are `vstore.Meta`. `id` is opaque to clients: at
   most 128 characters of `[A-Za-z0-9._:-]`, stable for the same keychain item across syncs.
 - `tags` are the tags on the final `Tags: #a #b` line of the entry's notes (canonical: NFC,
   lower case, at most 16, first-seen order), and `has_notes` says whether the notes **body**
@@ -177,6 +177,17 @@ with `state` one of `locked`, `unlocked`, `unavailable` only. `unavailable` cove
   feature is on (`features`, section 6.10), and `has_passkey` is false while `passkeys` is
   off. Both are read-only: `set` on one is `invalid` with `field:"id"`, and autofill never
   offers one.
+- `shared_group` is the name of the Apple Passwords shared group the entry comes from, `""`
+  for an entry of the person's own keychain. Pear reads the groups the person **owns** (never
+  writes to them) on every sync. A shared entry has its own id namespace (`sh1-...`, hashed over
+  the group, so it can never equal or replace an own entry's id), is paired and grouped only
+  with entries of its own group, and is read-only: it can be viewed and copied (password,
+  username, code, notes, websites), but `set` and `delete` on one are refused with
+  `shared-read-only` before any grant, dialog or request to iCloud, and autofill never offers
+  one. A sync updates or removes shared entries only after a complete fetch of every group; if
+  any part of that fetch fails, the shared entries stay exactly as they were and the sync of the
+  own keychain still completes. The own keychain's deletion detection never sees shared entries
+  and the shared fetch never sees own ones.
 - **One account on several websites is one row.** Apple keeps one keychain item per website
   with the same account and password and no field linking them, so the daemon groups live
   logins with the same username and the same password (compared by pwmac inside the daemon:
@@ -924,6 +935,7 @@ exact host match, rank 1 a related one. Name-only matches and inferred `aliases`
 | `network` | iCloud could not be reached |
 | `apple` | iCloud refused; a sanitized `detail` explains |
 | `invalid` | a field failed validation; `field` names it |
+| `shared-read-only` | `set` or `delete` on an entry that belongs to a shared group (`shared_group` is not empty) |
 | `wrong-passphrase` | the v1 key or passphrase does not open check.enc |
 | `mismatch` | the converted store did not verify; nothing was kept |
 | `incomplete` | `import-key` or `import-commit` before the files it needs |

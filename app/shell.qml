@@ -214,7 +214,7 @@ ShellRoot {
     property bool deleting: false
     readonly property bool canDelete: !!root.selected && root.appUnlocked
         && !root.selected.recently_deleted && root.selected.kind !== "passkey"
-        && !root.selected.is_wifi
+        && !root.selected.is_wifi && !root.selected.shared_group
     property bool generateNew: false
     property bool renaming: false
     property bool changing: false
@@ -1244,6 +1244,7 @@ ShellRoot {
         case "network": return "iCloud couldn't be reached";
         case "apple": return "iCloud refused it" + (d.detail ? ": " + d.detail : "");
         case "busy-sync": return "a sync is running — try again in a moment";
+        case "shared-read-only": return "entries of a shared group can only be viewed and copied here";
         case "seal-unavailable": return "the system key service didn't answer — try again in a moment";
         case "seal-refused":
             return d.reason === "pcr-policy"
@@ -1949,7 +1950,7 @@ ShellRoot {
         if (!s) return [];
         // Apple keeps these read-only (the daemon refuses a `set` on them): no edit is offered,
         // so an account buffer is not opened for an action that cannot happen.
-        const readOnly = !!s.recently_deleted || s.kind === "passkey";
+        const readOnly = !!s.recently_deleted || s.kind === "passkey" || !!s.shared_group;
         const rows = [{ key: "username", label: s.is_wifi ? "Network" : "Username", value: s.username || "—",
                         quiet: !s.username, actions: [{ key: "username", label: "copy" }] },
                       { key: "password", label: "Password",
@@ -2036,11 +2037,11 @@ ShellRoot {
         return (s.no_site ? [] : [s.domain]).concat(s.sites || []);
     }
 
-    // Rows Apple keeps read-only (the daemon refuses a `set` on them): Recently Deleted copies
-    // and passkey-only rows. Nothing on them may open an editor for an edit that cannot happen.
+    // Rows that are read-only (the daemon refuses a `set` on them): Recently Deleted copies,
+    // passkey-only rows and entries of an Apple Passwords shared group. Nothing on them may open an editor for an edit that cannot happen.
     function selectedReadOnly() {
         const s = root.selected;
-        return !!s && (!!s.recently_deleted || s.kind === "passkey");
+        return !!s && (!!s.recently_deleted || s.kind === "passkey" || !!s.shared_group);
     }
 
     function fieldAction(key) {
@@ -2995,6 +2996,44 @@ ShellRoot {
                                         font.bold: true
                                         font.letterSpacing: Theme.labelTracking
                                         elide: Text.ElideRight
+                                    }
+
+                                    // Entries of an Apple Passwords shared group are read-only
+                                    // here; the group's name says where it comes from.
+                                    Rectangle {
+                                        id: sharedBadge
+                                        visible: !!root.selected && !!root.selected.shared_group
+                                        Layout.preferredHeight: 24
+                                        Layout.preferredWidth: Math.min(sharedRow.implicitWidth + 16,
+                                                                        parent.width)
+                                        radius: Theme.radius
+                                        color: Theme.accentSoft
+                                        border.width: 1
+                                        border.color: Theme.tint(Theme.accent, 0.5)
+                                        RowLayout {
+                                            id: sharedRow
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 8
+                                            anchors.rightMargin: 8
+                                            spacing: 6
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                text: "\uf0c0"
+                                                color: Theme.accent
+                                                font.family: Theme.iconFont
+                                                font.pixelSize: Theme.fLabel
+                                            }
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                Layout.fillWidth: true
+                                                text: root.selected && root.selected.shared_group
+                                                      ? "Shared · " + root.selected.shared_group + " · view only" : ""
+                                                color: Theme.fg
+                                                font.family: Theme.uiFont
+                                                font.pixelSize: Theme.fLabel
+                                                elide: Text.ElideRight
+                                            }
+                                        }
                                     }
                                 }
 
@@ -5793,9 +5832,15 @@ ShellRoot {
                 gone.recently_deleted = true;
                 list_.push(wifi, gone);
             }
+            if (mode === "shared" || mode === "shared-cats") {
+                // Entries of Apple Passwords shared groups: read-only, named after the group.
+                list_[0].shared_group = "Family passwords";
+                list_[1].shared_group = "Family passwords";
+                list_[2].shared_group = "Work trip";
+            }
             if (mode === "cats-flags") root.takeFeatures({ passkeys: true, apple_deleted: true });
             root.setEntries(list_);
-            if (mode === "cats" || mode === "cats-flags") search.openCats(true, false);
+            if (mode === "cats" || mode === "cats-flags" || mode === "shared-cats") search.openCats(true, false);
             if (mode === "chip") {
                 root.setCatTag({ kind: "tag", key: "work", label: "work" });
                 search.text = "acc";
@@ -5805,7 +5850,7 @@ ShellRoot {
                 root.openTagEditor();
                 tagInput.text = "taxes";
             }
-            if (mode === "detail") {
+            if (mode === "detail" || mode === "shared") {
                 root.grantId = "demo1"; root.grantExpires = now + 118; root.grantLeft = 118;
                 root.revealed = "correct-horse-battery";
                 root.totpCode = "482913"; root.totpLeft = 21;

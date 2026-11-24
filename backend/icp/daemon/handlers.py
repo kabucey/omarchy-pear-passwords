@@ -170,9 +170,11 @@ def apple_error(e: BaseException) -> OpError:
     if isinstance(e, NeedsLogin):
         return OpError("needs-login")
     from ..errors import AppleError
-    from .apple import FieldError, NotSignedIn
+    from .apple import FieldError, NotSignedIn, SharedReadOnly
     if isinstance(e, NotSignedIn):
         return OpError("not-signed-in")
+    if isinstance(e, SharedReadOnly):
+        return OpError("shared-read-only")
     if isinstance(e, FieldError):
         extra = {"detail": _detail(e.detail)[:64]} if getattr(e, "detail", "") else {}
         return OpError("invalid", field=_detail(e.field)[:64], **extra)
@@ -466,6 +468,10 @@ async def background_sync(reg, uid: int) -> str:
                     "%d listed (%d waiting for a feature flag, %d Apple-internal)", uid,
                     *(int(counts.get(k, 0) or 0) for k in ("added", "changed", "deleted", "unchanged")),
                     len(metas), len(listed), hidden_flag, hidden_internal)
+        if "shared_total" in counts:
+            logger.info("uid %d: sync: %d shared entries in the store, shared groups updated: %s",
+                        uid, int(counts.get("shared_total") or 0),
+                        bool(counts.get("shared_updated")))
         for cid in getattr(s, "created_ids", None) or ():
             logger.info("uid %d: created this run: %s", uid, _where_is(metas, listed, cid))
         # Entries changed in the last 3 days that the list hides, and which rule hides them:
@@ -786,11 +792,21 @@ async def op_set(reg, conn, req):
     generate = req.get("generate")
     clean = validate_fields(fields, generate, protocol.SET_FIELDS)
     s = _tier1(reg, conn)
+    try:       # first of all: a shared entry has no grant to be had for an edit
+        early = await _store(reg, conn.uid, s.store.get_meta, id)
+    except OpError:
+        early = None
+    if getattr(early, "shared_group", ""):
+        raise OpError("shared-read-only")
     reg.grant_check(conn.uid, id)
     # A Recently Deleted copy and a passkey-only row are read-only: nothing to push them to.
     epoch = s.epoch
     meta = await _store(reg, conn.uid, s.store.get_meta, id)
     _still(s, conn, epoch)
+    # An entry of a shared group is read-only, whatever the field (a rename and a tag change
+    # included): refused before a grant is taken or anything is sent to iCloud.
+    if getattr(meta, "shared_group", ""):
+        raise OpError("shared-read-only")
     if getattr(meta, "recently_deleted", False) or getattr(meta, "kind", "login") == "passkey":
         raise OpError("invalid", field="id")
     # A Wi-Fi network has no details record (the WiFi zone keeps none), so its notes, and the
@@ -881,6 +897,8 @@ async def op_delete(reg, conn, req):
     id = _need_id(req)
     s = _tier1(reg, conn)
     meta = await _store(reg, conn.uid, s.store.get_meta, id)
+    if getattr(meta, "shared_group", ""):      # before any dialog, as for the rows below
+        raise OpError("shared-read-only")
     # Read-only rows, as in op_set. A Recently Deleted copy keeps the live account's domain and
     # username, so a delete would remove the LIVE login. Refused before any dialog.
     if getattr(meta, "recently_deleted", False) or getattr(meta, "kind", "login") == "passkey":

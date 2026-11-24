@@ -58,6 +58,8 @@ def meta_to_wire(m, features: dict | None = None) -> dict:
         "kind": "passkey" if getattr(m, "kind", "login") == "passkey" else "login",
         "has_password": bool(getattr(m, "has_password", True)),
         "recently_deleted": bool(getattr(m, "recently_deleted", False)),
+        "shared_group": getattr(m, "shared_group", "") if isinstance(
+            getattr(m, "shared_group", ""), str) else "",
         "_real_title": d["primary"],
     }
 

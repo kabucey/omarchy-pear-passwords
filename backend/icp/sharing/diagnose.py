@@ -19,7 +19,7 @@ import re
 import time
 
 from ..keychain import pipeline
-from ..proto.codec import decode_fields, first_str
+from ..proto.codec import decode_fields, first, first_str
 from ..transport import ckks, cloudkit
 from . import groups, pcs
 
@@ -27,7 +27,6 @@ log = logging.getLogger(__name__)
 
 PCS_AGRP_PREFIX = "com.apple.ProtectedCloudStorage"
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-MAX_ZONE_PAGES = 25
 
 
 def _name(value) -> str:
@@ -74,6 +73,16 @@ def pcs_keys_from_records(records_by_type: dict, tlks: dict) -> tuple[dict[bytes
 
 # --------------------------------------------------------------------------- one group
 
+def _field_numbers(payload: bytes, kind: int) -> str:
+    """The field numbers inside payload field `kind`, "1+2+5": a shape, never a value."""
+    try:
+        inner = first(decode_fields(payload), kind)
+        nums = sorted(decode_fields(inner)) if isinstance(inner, (bytes, bytearray)) else []
+    except Exception:  # noqa: BLE001
+        nums = []
+    return "+".join(str(n) for n in nums) or "-"
+
+
 class _Distinct:
     """Counts distinct values without keeping them: a salted digest per value, in memory."""
 
@@ -94,7 +103,7 @@ class _Distinct:
 def _empty_stats() -> dict:
     return {"records": 0, "types": {}, "type_field": {}, "duplicate_record_names": 0,
             "items": 0, "items_without_payload": 0, "decrypted": 0, "failed": {},
-            "payload_kinds": {}, "agrp": {},
+            "payload_kinds": {}, "payload_shapes": {}, "agrp": {},
             "internet_passwords": 0, "empty_password": 0, "empty_server": 0,
             "empty_account": 0}
 
@@ -156,6 +165,9 @@ def analyse_group(zone_name: str, records: list[dict], protection: dict | None,
             stage = "parse"
             kinds = sorted(decode_fields(plain))
             _bump(st["payload_kinds"], "+".join(str(k) for k in kinds) or "empty")
+            for k in kinds:
+                if k != 3:       # what the sync skips: the field numbers inside it, no value
+                    _bump(st["payload_shapes"], f"{k}:" + _field_numbers(plain, k))
             item = groups.sharing_item_to_keychain(plain)
             st["decrypted"] += 1
         except Exception as e:  # noqa: BLE001 - counted by class name only
@@ -197,18 +209,7 @@ def _merge(total: dict, st: dict) -> None:
 
 # --------------------------------------------------------------------------- the run
 
-def _list_zones(transport) -> list[dict]:
-    zones, continuation = [], None
-    for _ in range(MAX_ZONE_PAGES):
-        page = ckks.parse_zone_changes_response(transport.probe_zone_changes(
-            continuation, bundle=cloudkit.KCSHARING_BUNDLE, database=cloudkit.DB_PRIVATE,
-            scope="Private"))
-        zones.extend(page["zones"])
-        continuation = page.get("continuation_token")
-        if page.get("status") == 2 or not continuation:
-            break
-    deleted = {z["name"] for z in zones if z.get("change_type") == 2}
-    return [z for z in zones if z["name"].startswith("group-") and z["name"] not in deleted]
+_list_zones = groups.list_zones
 
 
 def run(transport, kc_user: str, keychain_keys: dict[bytes, bytes]) -> dict:

@@ -2,9 +2,9 @@
 
 // The search field's categories and tags (docs: features spec 3 and 5b). Pure functions over
 // the list the daemon already sent after the first dialog (tier-1 Meta: tags, has_totp,
-// is_wifi, has_passkey, kind, recently_deleted). Nothing here reads a secret or asks for one.
+// is_wifi, has_passkey, kind, recently_deleted, shared_group). Nothing here reads a secret or asks for one.
 //
-// A tag is { kind: "cat", key: "codes" | "wifi" | "passkeys" | "deleted", label } or
+// A tag is { kind: "cat", key: "codes" | "wifi" | "passkeys" | "shared" | "deleted", label } or
 // { kind: "tag", key: <fold key>, label: <display> }; null is All.
 
 // The synced categories, in Apple's sidebar order. Passkeys and Deleted wait for their
@@ -14,8 +14,11 @@ const CATEGORIES = [
     { key: "passkeys", label: "Passkeys", icon: "󰀄", tint: "#34c759", flag: "passkeys" },
     { key: "codes", label: "Codes", icon: "󰥿", tint: "#e6b422", flag: "" },
     { key: "wifi", label: "Wi-Fi", icon: "", tint: "#4aa8e8", flag: "" },
+    { key: "shared", label: "Shared", icon: "\uf0c0", tint: "#af52de", flag: "" },
     { key: "deleted", label: "Deleted", icon: "", tint: "#f0932b", flag: "apple_deleted" }
 ];
+// Shown only while some entry belongs to a shared group (nothing to filter otherwise).
+const HIDDEN_WHEN_EMPTY = { shared: true };
 const ALL_ICON = "";
 const ALL_TINT = "#3478f6";
 const MAX_TAGS = 16;
@@ -68,12 +71,14 @@ function matches(e, tag) {
         const tags = e.tags || [];
         for (let i = 0; i < tags.length; i++)
             if (fold(tags[i]) === tag.key) return true;
-        return false;
+        // The name of an Apple Passwords shared group filters like a tag.
+        return !!e.shared_group && fold(e.shared_group) === tag.key;
     }
     switch (tag.key) {
     case "codes": return !!e.has_totp && !e.recently_deleted;
     case "wifi": return !!e.is_wifi && !e.recently_deleted;
     case "passkeys": return (!!e.has_passkey || e.kind === "passkey") && !e.recently_deleted;
+    case "shared": return !!e.shared_group && !e.recently_deleted;
     case "deleted": return !!e.recently_deleted;
     }
     return false;
@@ -102,6 +107,10 @@ function tagLabels(entries) {
             const k = fold(tags[j]);
             if (seen[k] === undefined) { seen[k] = true; out.push({ key: k, label: String(tags[j]) }); }
         }
+        if (e.shared_group) {
+            const g = fold(e.shared_group);
+            if (seen[g] === undefined) { seen[g] = true; out.push({ key: g, label: String(e.shared_group) }); }
+        }
     }
     out.sort(function (a, b) { return a.key < b.key ? -1 : a.key > b.key ? 1 : 0; });
     return out;
@@ -114,7 +123,10 @@ function stillValid(entries, features, tag) {
     if (tag.kind === "tag") return count(entries, tag) > 0;
     const f = features_(features);
     for (let i = 0; i < CATEGORIES.length; i++)
-        if (CATEGORIES[i].key === tag.key) return !CATEGORIES[i].flag || f[CATEGORIES[i].flag];
+        if (CATEGORIES[i].key === tag.key) {
+            if (HIDDEN_WHEN_EMPTY[tag.key] && count(entries, tag) === 0) return false;
+            return !CATEGORIES[i].flag || f[CATEGORIES[i].flag];
+        }
     return false;
 }
 
@@ -134,7 +146,9 @@ function rows(entries, features, filter) {
         if (c.flag && !f[c.flag]) continue;
         if (!starts(c.label)) continue;
         const tag = { kind: "cat", key: c.key, label: c.label };
-        out.push({ kind: "cat", key: c.key, label: c.label, count: count(entries, tag),
+        const n = count(entries, tag);
+        if (HIDDEN_WHEN_EMPTY[c.key] && n === 0) continue;
+        out.push({ kind: "cat", key: c.key, label: c.label, count: n,
                    icon: c.icon, tint: c.tint });
     }
     const tags = tagLabels(entries);

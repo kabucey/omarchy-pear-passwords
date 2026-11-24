@@ -27,6 +27,7 @@ from ..auth import session as session_store, signin
 from ..auth.anisette import Anisette
 from ..auth.device import Device
 from ..errors import AppleError
+from ..vstore.ids import is_shared_id
 from .context import Cancelled, NeedsLogin
 
 if TYPE_CHECKING:
@@ -39,6 +40,16 @@ NICKNAME_MAX = 80
 
 class NotSignedIn(AppleError):
     """No iCloud session, or a session that never joined the keychain. Protocol `not-signed-in`."""
+
+
+class SharedReadOnly(AppleError):
+    """A write was asked of an entry that belongs to an Apple Passwords shared group. Pear
+    only reads those: protocol `shared-read-only`. Raised before any network traffic."""
+
+
+def refuse_shared(meta) -> None:
+    if getattr(meta, "shared_group", ""):
+        raise SharedReadOnly("a shared-group entry is read-only")
 
 
 class FieldError(ValueError):
@@ -110,8 +121,10 @@ def _deleted(store, items: list, failed_zones: list) -> set:
     if failed_zones:
         logger.warning("not applying deletions: %d zone(s) did not load", len(failed_zones))
         return set()
-    known = {m.id for m in store.list_meta()}
-    gone = known - present
+    # Shared-group entries are the shared fetch's to remove, never this one's: this fetch
+    # does not return them, so every one of them would look deleted.
+    known = {m.id for m in store.list_meta() if not getattr(m, "shared_group", "")}
+    gone = {i for i in known - present if not is_shared_id(i)}
     if gone and not present:
         logger.warning("not applying deletions: the keychain returned no entries at all")
         return set()
@@ -138,11 +151,53 @@ def _sync_with(ctx: "UserContext", s: dict, device, anisette, client=None) -> di
     counts = dict(store.apply_sync(items, deleted))
     n = len(items)
     del items
+    shared = _apply_shared(ctx, getattr(client, "shared", None))
+    if hasattr(client, "shared"):
+        client.shared = None
     synced_at = time.time()
     store.set_sync_status(synced_at=synced_at, needs_login=False)
-    ctx.ui.stage("synced", count=n)
-    ctx.ui.emit("out", f"Synced {n} credential(s).")
-    return {**counts, "synced_at": synced_at}
+    msg = f"Synced {n} credential(s)"
+    if shared["complete"]:
+        msg += f", {shared['total']} shared"
+    elif shared["attempted"]:
+        msg += ", shared groups not updated"
+    ctx.ui.stage("synced", count=n, shared=shared["total"], shared_updated=shared["complete"])
+    ctx.ui.emit("out", msg + ".")
+    return {**counts, "synced_at": synced_at, "shared_total": shared["total"],
+            "shared_updated": shared["complete"]}
+
+
+def _apply_shared(ctx: "UserContext", res) -> dict:
+    """Hand a COMPLETE shared-group fetch to the store; anything else changes nothing.
+
+    {"attempted": the sync looked at the shared groups, "complete": the vault now matches
+    them, "total": how many shared entries the vault holds, "added"/"changed"/"deleted"}.
+    A failure here (including the store write) never fails the sync of the own keychain: the
+    shared entries keep whatever the last complete fetch left."""
+    store = ctx.store
+    out = {"attempted": res is not None, "complete": False, "total": 0}
+    try:
+        out["total"] = sum(1 for m in store.list_meta() if getattr(m, "shared_group", ""))
+        if res is None or not getattr(res, "complete", False):
+            if res is not None:
+                logger.warning("shared groups not updated: %s", getattr(res, "stats", {}))
+            return out
+        counts = store.apply_shared_sync(res.items)
+        out.update(complete=True, **{k: int(v) for k, v in counts.items()})
+        out["total"] = sum(1 for m in store.list_meta() if getattr(m, "shared_group", ""))
+        logger.info("shared groups: %d entries (added %d, changed %d, deleted %d)",
+                    out["total"], counts["added"], counts["changed"], counts["deleted"])
+    except Exception as e:  # noqa: BLE001 - the shared part must not fail the own sync
+        if _is_lock(e):
+            raise
+        logger.warning("shared groups not stored: %s", type(e).__name__)
+        out["complete"] = False
+    return out
+
+
+def _is_lock(e: BaseException) -> bool:
+    from ..vstore import StoreLocked
+    return isinstance(e, StoreLocked)
 
 
 def _device(ctx: "UserContext"):
@@ -458,6 +513,7 @@ def push_set(ctx: "UserContext", id: str, fields: dict) -> None:
         raise FieldError(sorted(unknown)[0])
     store = ctx.store
     meta = store.get_meta(id)
+    refuse_shared(meta)
     if getattr(meta, "recently_deleted", False) or getattr(meta, "kind", "login") == "passkey":
         raise FieldError("id", "a Recently Deleted or passkey-only row is read-only")
     domain, username = meta.domain, meta.username
@@ -578,6 +634,7 @@ def delete(ctx: "UserContext", id: str) -> None:
     from ..cli import push
 
     meta = ctx.store.get_meta(id)
+    refuse_shared(meta)
     # _pair matches only the live access groups, so deleting a Recently Deleted copy by its
     # domain and username would remove the live login. Read-only, as in push_set.
     if getattr(meta, "recently_deleted", False) or getattr(meta, "kind", "login") == "passkey":
