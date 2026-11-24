@@ -21,6 +21,10 @@ MouseArea {
     required property Flickable flickable
 
     // GTK 4's constants, so a flick here travels like one in a GTK app beside it.
+    // How far content moves per touchpad pixel. Qt applies Hyprland's touchpad scroll_factor
+    // (0.4 on Omarchy, often lower) to the deltas as they are, so at 1 the content crawls well
+    // behind the fingers. The glide follows, since its speed is measured from these moves.
+    readonly property real speed: 3
     readonly property real friction: 4        // DECELERATION_FRICTION, per second
     readonly property int captureMs: 150      // SCROLL_CAPTURE_THRESHOLD_MS
     readonly property real minFlick: 50       // px/s: slower than this when the fingers lift is a stop
@@ -81,6 +85,8 @@ MouseArea {
             if (phase === Qt.ScrollEnd) gesture = false;
             return false;                                 // nothing to scroll here: let it through
         }
+        dx *= speed;
+        dy *= speed;
         if (dx || dy) {
             stop();
             moveBy(dx, dy);

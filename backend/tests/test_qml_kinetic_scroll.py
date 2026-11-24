@@ -55,6 +55,7 @@ class WiringTests(unittest.TestCase):
             src = f.read()
         self.assertIn("friction: 4", src)
         self.assertIn("captureMs: 150", src)
+        self.assertIn("dy *= speed;", src)
         self.assertIn("k.stop(); m.accepted = false;", src)
         self.assertIn("hoverEnabled: false", src)
         self.assertIn("return false;                                 // a mouse wheel", src)
@@ -105,13 +106,13 @@ Item {
             k.feed(Qt.ScrollBegin, 0, 0, 1000);
             k.feed(Qt.ScrollUpdate, 0, -10, 1008);
             k.feed(Qt.ScrollUpdate, 0, -15, 1016);
-            compare(f.contentY, 25);
+            compare(f.contentY, 25 * k.speed);
         }
 
         function test_a_flick_glides_on_and_stops() {
             verify(swipe(k, -20, 10, 1000));
             var lifted = f.contentY;
-            compare(lifted, 200);
+            compare(lifted, 200 * k.speed);
             tryVerify(function () { return f.contentY > lifted + 100; }, 2000);
             verify(k.gliding);
             tryCompare(k, "gliding", false, 5000);
