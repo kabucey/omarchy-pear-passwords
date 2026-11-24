@@ -162,7 +162,10 @@ ShellRoot {
     property bool appUnlocked: false
     // The search field takes the keyboard as soon as the list is usable (first unlock and every
     // re-unlock), so typing starts a search. Not while a dialog or the sign-in form is up.
-    onAppUnlockedChanged: if (root.appUnlocked) Qt.callLater(root.focusSearch)
+    // Unlocking goes through the polkit prompt, a window of its own; when it closes Hyprland
+    // hands the keyboard back to whatever had it before Pear opened. So once unlocked, Pear asks
+    // for focus again, as it does when it first appears.
+    onAppUnlockedChanged: if (root.appUnlocked) { Qt.callLater(root.focusSearch); launchFocus.restart(); }
     property bool autoAuthTried: false
     property bool authing: false
     property int authRid: -1
@@ -568,7 +571,7 @@ ShellRoot {
     }
     Timer { interval: 800; running: true; onTriggered: root.connectGrace = true }
     property bool launchFocused: false
-    Timer { id: launchFocus; interval: 150; onTriggered: focusProc.running = true }
+    Timer { id: launchFocus; interval: 300; onTriggered: focusProc.running = true }
     Process {
         id: focusProc
         running: false

@@ -99,5 +99,9 @@ class LaunchFocusTests(unittest.TestCase):
     def test_first_showing_asks_for_focus_once(self):
         self.assertIn("onVisibleChanged: if (visible && !root.launchFocused) "
                       "{ root.launchFocused = true; launchFocus.start(); }", CODE)
-        self.assertIn("Timer { id: launchFocus; interval: 150; "
+        self.assertIn("Timer { id: launchFocus; interval: 300; "
                       "onTriggered: focusProc.running = true }", CODE)
+
+    def test_unlocking_asks_again_after_the_prompt_closes(self):
+        self.assertIn("onAppUnlockedChanged: if (root.appUnlocked) "
+                      "{ Qt.callLater(root.focusSearch); launchFocus.restart(); }", CODE)
