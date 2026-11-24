@@ -21,7 +21,6 @@ ALLOWED = {
     '["/usr/bin/hyprctl", "eval", root.windowModeLua]',
     '["/usr/bin/hyprctl", "dispatch", root.focusLua]',
     '["/usr/bin/hyprctl", "dispatch", opener.lua]',
-    '["/usr/bin/python3", "-I", root.touchWatchPath]',
     '["/usr/bin/python3", "-I", root.qrScanPath]',
     '["/usr/bin/systemctl", "show", "-p", "LoadState,ActiveState,Result,ExecMainStatus", '
     '"pear-passwordsd.service"]',
@@ -72,7 +71,6 @@ class AllowlistTests(unittest.TestCase):
         code = self.files[SHELL_QML]
         self.assertEqual(property_value(code, "pearExec"), paths.PEAR_EXEC)
         self.assertEqual(property_value(code, "socketPath"), paths.SOCKET_PATH)
-        self.assertTrue(os.path.exists(os.path.join(qmlscan.APP, "touch_watch.py")))
         self.assertTrue(os.path.exists(os.path.join(qmlscan.APP, "qr_scan.py")))
         rules = re.search(r"readonly property string windowRulesLua:(.*?)\n\s*readonly", code,
                           re.S).group(1)

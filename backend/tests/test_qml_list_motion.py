@@ -21,21 +21,19 @@ def function_text(name: str) -> str:
 
 
 class ListMotionTests(unittest.TestCase):
-    def test_a_bounce_aims_at_the_bounds_as_they_are_now(self):
-        step = CODE[CODE.index('if (list.mode === "bounce") {'):]
-        step = step[:step.index("// exact critically damped step")]
-        self.assertIn("list.contentY >= list.minY && list.contentY <= list.maxY", step)
-        self.assertIn('list.mode = "idle";', step)
-        self.assertIn("list.bounceTarget = list.contentY < list.minY ? list.minY", step)
+    """The account list scrolls the way the system does: Qt's own Flickable, so the wheel and
+    touchpad follow Hyprland's scroll_factor and libinput, with nothing remapped in the app."""
 
-    def test_momentum_is_capped_and_stops_when_the_rows_change(self):
-        self.assertIn("if (list.movingFor > 3000) { list.settle(); return; }", CODE)
-        self.assertIn("onModelChanged: list.settle()", CODE)
-        # The list's own settle (another settle() in the file belongs to the 1.x check).
-        settle = CODE[CODE.index("function settle() {\n                                list.stopPhysics();"):]
-        settle = settle[:settle.index("}")]
-        self.assertIn("Math.max(list.minY, Math.min(list.maxY, list.contentY))", settle)
+    def test_the_list_uses_native_scrolling(self):
+        lst = CODE[CODE.index("id: list\n"):]
+        lst = lst[:lst.index("delegate:")]
+        self.assertNotIn("interactive: false", lst)
+        self.assertNotIn("WheelHandler", lst)
+        self.assertNotIn("FrameAnimation", lst)
 
+    def test_no_touchpad_watcher(self):
+        self.assertNotIn("touchWatch", CODE)
+        self.assertNotIn("touch_watch.py", CODE)
 
 class TypeToSearchTests(unittest.TestCase):
     def test_it_is_the_windows_last_key_branch(self):

@@ -24,7 +24,7 @@ import "categories.js" as Cat
 //   - no console.log, of anything;
 //   - child processes only from the fixed list below: hyprctl (window rules, focus, opening a
 //     link through Hyprland so the browser does not inherit our group), pear-exec clip and
-//     migrate, the touchpad watcher and `systemctl show` for diagnostics; plus, through
+//     migrate, the QR scanner and `systemctl show` for diagnostics; plus, through
 //     Omarchy's Style singleton, `hyprctl -j getoption` (rounding, gaps) and `fc-match
 //     monospace`, which also re-run when your fonts.conf or the window-gaps toggle changes
 //     (test_qml_process_allowlist.py pins both lists, and Omarchy's reads from your home).
@@ -38,8 +38,6 @@ ShellRoot {
     // ---------------------------------------------------------------- fixed paths and commands
     readonly property string socketPath: "/run/pear-passwords/client.sock"
     readonly property string pearExec: "/usr/local/lib/pear-passwords/libexec/pear-exec"
-    readonly property string touchWatchPath: decodeURIComponent(
-        Qt.resolvedUrl("touch_watch.py").toString().replace(/^file:\/\//, ""))
     readonly property string qrScanPath: decodeURIComponent(
         Qt.resolvedUrl("qr_scan.py").toString().replace(/^file:\/\//, ""))
     readonly property string home: Quickshell.env("HOME")
@@ -650,18 +648,6 @@ ShellRoot {
         onTriggered: root.previewTotp(text)
     }
 
-    // Tells us when fingers touch the touchpad - the one event Qt's Wayland client never
-    // delivers (see touch_watch.py). Runs only while unlocked, prints only "touch".
-    Process {
-        id: touchWatch
-        running: root.appUnlocked && !root.previewMode
-        command: ["/usr/bin/python3", "-I", root.touchWatchPath]
-        stdout: SplitParser {
-            splitMarker: "\n"
-            onRead: function (line) { if (line === "touch") list.catchCoast(); }
-        }
-    }
-
     // ---------------------------------------------------------------- pear-exec children
     // Copy: the value never comes here. The daemon puts it in a ticket; pear-clip redeems it
     // and owns the clipboard. A component, because a second copy may start while the first
@@ -1104,7 +1090,7 @@ ShellRoot {
         if (!root.filtered.length) return;
         root.cursor = Math.max(0, Math.min(root.filtered.length - 1, root.cursor + delta));
         root.select(root.filtered[root.cursor]);
-        list.stopPhysics();
+        list.cancelFlick();
         list.positionViewAtIndex(root.cursor, ListView.Contain);
     }
 
@@ -2458,201 +2444,9 @@ ShellRoot {
                             Layout.fillHeight: true
                             visible: root.appUnlocked
                             clip: true
-                            // Scrolling is ours, not Flickable's. A mouse notch glides instead of
-                            // jumping; a touchpad follows the fingers 1:1 and stretches past the
-                            // ends with resistance, then springs back when the fingers lift.
-                            // interactive:false is what hands wheel events to the handler below -
-                            // with it on, Flickable took them too and scrolled twice.
-                            interactive: false
-                            readonly property real minY: originY
-                            readonly property real maxY: Math.max(originY, originY + contentHeight - height)
-
-                            // ---- Apple's scroll physics --------------------------------------------
-                            // decelRate: UIScrollView.DecelerationRate.normal, per millisecond. Speed
-                            //   decays exponentially, v = v0 * 0.998^t - fast start, long smooth tail.
-                            // bandC: the rubber-band constant from UIScrollView,
-                            //   f(x) = (1 - 1/(x*c/d + 1)) * d - the further past an end, the less it gives.
-                            // springOmega: bounce-back is a critically damped spring (damping 1.0, as in
-                            //   WWDC "Designing Fluid Interfaces"), 0.4 s response, carrying the flick's speed.
-                            // accelMax: the one part that is NOT Apple's published curve. macOS accelerates
-                            //   fast scrolls in the OS and hasn't documented how; libinput deliberately
-                            //   doesn't accelerate touchpad scrolling at all. Slow stays 1:1, fast gains up
-                            //   to (1 + accelMax)x. If sensitivity feels off, this is the knob.
-                            readonly property real decelRate: 0.998
-                            readonly property real bandC: 0.55
-                            readonly property real springOmega: 2 * Math.PI / 400
-                            readonly property real accelMax: 1.6
-
-                            property string mode: "idle"      // idle | drag | coast | bounce
-                            property real vel: 0              // px/ms along contentY
-                            property real rawY: 0             // where the fingers put it, before the band
-                            property real bounceTarget: 0
-                            property var samples: []
-                            property real lastT: 0
-                            property real glideTo: 0
-
-                            function band(x) { const d = list.height; return (1 - 1 / (x * list.bandC / d + 1)) * d; }
-                            function unband(y) {
-                                const d = list.height;
-                                return y >= d * 0.999 ? y * 50 : y * d / (list.bandC * (d - y));
-                            }
-                            function banded(raw) {
-                                if (raw < list.minY) return list.minY - list.band(list.minY - raw);
-                                if (raw > list.maxY) return list.maxY + list.band(raw - list.maxY);
-                                return raw;
-                            }
-                            function unbanded(y) {
-                                if (y < list.minY) return list.minY - list.unband(list.minY - y);
-                                if (y > list.maxY) return list.maxY + list.unband(y - list.maxY);
-                                return y;
-                            }
-
-                            // Continuous input (touchpad) is tracked through the physics above; a
-                            // discrete mouse notch glides to an accumulating target. A value that isn't a
-                            // multiple of 120 is continuous even when pixelDelta is empty.
-                            WheelHandler {
-                                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                                onWheel: function (ev) {
-                                    const px = ev.pixelDelta.y, ad = ev.angleDelta.y;
-                                    // The lift carries no movement, so catch it before "did it move".
-                                    if (ev.phase === Qt.ScrollEnd) { list.letGo(); return; }
-                                    if (px !== 0 || ad % 120 !== 0) {
-                                        glide.stop();
-                                        list.pushBy(px !== 0 ? -px : -ad / 120 * 60);
-                                        endTimer.restart();
-                                    } else if (ad !== 0) {
-                                        list.mode = "idle";
-                                        const base = glide.running ? list.glideTo : list.contentY;
-                                        list.glideTo = Math.max(list.minY, Math.min(list.maxY, base - ad / 120 * 110));
-                                        glide.to = list.glideTo;
-                                        glide.restart();
-                                    }
-                                }
-                            }
-                            NumberAnimation { id: glide; target: list; property: "contentY"
-                                              duration: 240; easing.type: Easing.OutCubic }
-                            // Fingers lifted, for input paths that never send ScrollEnd.
-                            Timer { id: endTimer; interval: 90; onTriggered: list.letGo() }
-                            // Integrated per frame, not fitted to an easing curve: exact at any refresh rate.
-                            FrameAnimation {
-                                running: list.mode === "coast" || list.mode === "bounce"
-                                onRunningChanged: list.movingFor = 0
-                                onTriggered: {
-                                    const dt = Math.min(frameTime * 1000, 34);
-                                    list.movingFor += dt;
-                                    // Momentum is a flick's tail, never a state: after 3 s, settle in bounds.
-                                    if (list.movingFor > 3000) { list.settle(); return; }
-                                    list.step(dt);
-                                }
-                            }
-                            property real movingFor: 0
-
-                            function pushBy(dy) {
-                                const now = Date.now();
-                                if (list.mode !== "drag") {     // fingers down: take over from any coast
-                                    list.mode = "drag";
-                                    list.vel = 0;
-                                    list.rawY = list.unbanded(list.contentY);
-                                    list.samples = [];
-                                    list.lastT = now;
-                                }
-                                const dt = Math.max(1, now - list.lastT);
-                                list.lastT = now;
-                                const speed = Math.abs(dy) / dt;                      // px/ms
-                                const gain = 1 + list.accelMax * Math.max(0, Math.min(1, (speed - 0.35) / 2.2));
-                                const moved = dy * gain;
-                                list.samples = list.samples.filter(function (s) { return now - s.t < 160; })
-                                                           .concat([{ t: now, dy: moved }]);
-                                list.rawY += moved;
-                                list.contentY = list.banded(list.rawY);
-                            }
-
-                            function letGo() {
-                                endTimer.stop();
-                                if (list.mode !== "drag") return;
-                                const s = list.samples;
-                                list.samples = [];
-                                let v = 0;
-                                if (s.length >= 3) {
-                                    // speed between the first and last movement, never to "now"
-                                    const last = s[s.length - 1].t;
-                                    const w = s.filter(function (x) { return last - x.t <= 110; });
-                                    if (w.length >= 3) {
-                                        let travelled = 0;
-                                        for (let k = 1; k < w.length; k++) travelled += w[k].dy;
-                                        v = travelled / Math.max(8, last - w[0].t);
-                                    }
-                                }
-                                list.vel = Math.max(-8, Math.min(8, v));
-                                if (list.contentY < list.minY || list.contentY > list.maxY) list.startBounce();
-                                else list.mode = Math.abs(list.vel) > 0.02 ? "coast" : "idle";
-                            }
-
-                            function startBounce() {
-                                list.bounceTarget = list.contentY < list.minY ? list.minY : list.maxY;
-                                list.mode = "bounce";
-                            }
-
-                            function step(dt) {
-                                if (list.mode === "coast") {
-                                    const decay = Math.pow(list.decelRate, dt);
-                                    list.contentY += list.vel * (decay - 1) / Math.log(list.decelRate);
-                                    list.vel *= decay;
-                                    if (list.contentY < list.minY || list.contentY > list.maxY) list.startBounce();
-                                    else if (Math.abs(list.vel) < 0.01) { list.vel = 0; list.mode = "idle"; }
-                                    return;
-                                }
-                                if (list.mode === "bounce") {
-                                    // ListView only estimates contentHeight for a long list and corrects it
-                                    // as rows are made, so the ends move: aim at where they are now, and
-                                    // stop once back inside (a stale target was chased for ever).
-                                    if (list.contentY >= list.minY && list.contentY <= list.maxY
-                                            && Math.abs(list.vel) < 0.05) {
-                                        list.vel = 0;
-                                        list.mode = "idle";
-                                        return;
-                                    }
-                                    list.bounceTarget = list.contentY < list.minY ? list.minY
-                                                      : list.contentY > list.maxY ? list.maxY : list.bounceTarget;
-                                    // exact critically damped step: x(t) = (x0 + (v0 + w*x0) t) e^(-wt)
-                                    const w = list.springOmega;
-                                    const x0 = list.contentY - list.bounceTarget, v0 = list.vel;
-                                    const e = Math.exp(-w * dt), B = v0 + w * x0;
-                                    const x = (x0 + B * dt) * e;
-                                    list.vel = (v0 - w * B * dt) * e;
-                                    list.contentY = list.bounceTarget + x;
-                                    if (Math.abs(x) < 0.3 && Math.abs(list.vel) < 0.02) {
-                                        list.contentY = list.bounceTarget;
-                                        list.vel = 0;
-                                        list.mode = "idle";
-                                    }
-                                }
-                            }
-
-                            // Fingers landed mid-coast (touch_watch.py): stop dead. A bounce is let
-                            // through, or it would strand the list stretched past an end.
-                            function catchCoast() {
-                                glide.stop();
-                                if (list.mode === "coast") {
-                                    list.vel = 0;
-                                    if (list.contentY < list.minY || list.contentY > list.maxY) list.startBounce();
-                                    else list.mode = "idle";
-                                }
-                            }
-
-                            function stopPhysics() {
-                                glide.stop();
-                                list.vel = 0;
-                                list.mode = "idle";
-                            }
-                            // Stop and put the view inside its bounds as they are now.
-                            function settle() {
-                                list.stopPhysics();
-                                list.contentY = Math.max(list.minY, Math.min(list.maxY, list.contentY));
-                            }
-                            // New rows (a sync, a delete, a filter): whatever was moving was moving over
-                            // the old list, so it stops here.
-                            onModelChanged: list.settle()
+                            // Scrolling is Qt's own, like every other list in the window, so the
+                            // wheel and touchpad follow the system (Hyprland's scroll_factor and
+                            // libinput) with nothing remapped here.
                             model: root.filtered
                             currentIndex: root.cursor
                             ScrollBar.vertical: AppScrollBar {}
