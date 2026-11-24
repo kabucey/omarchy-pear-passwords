@@ -815,11 +815,13 @@ class RuntimeTests(unittest.TestCase):
             shutil.copy(SEARCH_QML, d)
             shutil.copy(CATS_JS, d)
             shutil.copy(os.path.join(qmlscan.APP, "AppScrollBar.qml"), d)
+            shutil.copy(os.path.join(qmlscan.APP, "KineticScroll.qml"), d)
             with open(os.path.join(d, "Theme.qml"), "w") as f:
                 f.write(THEME)
             with open(os.path.join(d, "qmldir"), "w") as f:
                 f.write("singleton Theme 1.0 Theme.qml\nCategorySearch 1.0 CategorySearch.qml\n"
-                        "AppScrollBar 1.0 AppScrollBar.qml\n")
+                        "AppScrollBar 1.0 AppScrollBar.qml\n"
+                        "KineticScroll 1.0 KineticScroll.qml\n")
             path = os.path.join(d, "tst_categorytag.qml")
             with open(path, "w") as f:
                 f.write(TEST_QML.replace("%(fixture)s", FIXTURE))

@@ -363,6 +363,7 @@ TextField {
                 clip: true
                 model: catSearch.catRows
                 ScrollBar.vertical: AppScrollBar {}
+                KineticScroll { flickable: rowsView }
                 delegate: Item {
                     id: crow
                     required property var modelData

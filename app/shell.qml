@@ -2485,6 +2485,7 @@ ShellRoot {
                             model: root.filtered
                             currentIndex: root.cursor
                             ScrollBar.vertical: AppScrollBar {}
+                            KineticScroll { flickable: list }
 
                             delegate: Item {
                                 id: lrow
@@ -3485,6 +3486,7 @@ ShellRoot {
                                 clip: true
                                 model: root.historyRows
                                 ScrollBar.vertical: AppScrollBar {}
+                                KineticScroll { flickable: historyList }
                                 // Masked per row: this is a list of former passwords, so it
                                 // must not be less protected than the live one. Click a row
                                 // to see it - no button column.
@@ -3829,6 +3831,7 @@ ShellRoot {
                     contentHeight: edSheet.implicitHeight + 60
                     clip: true
                     ScrollBar.vertical: AppScrollBar {}
+                    KineticScroll { flickable: edFlick }
                 ColumnLayout {
                     id: edSheet
                     x: 30
@@ -3893,6 +3896,7 @@ ShellRoot {
                             border.width: 1
                             border.color: edArea.activeFocus ? Theme.accent : Theme.line
                             ScrollView {
+                                id: edAreaScroll
                                 anchors.fill: parent
                                 anchors.margins: 1
                                 TextArea {
@@ -3918,6 +3922,7 @@ ShellRoot {
                                     background: null
                                 }
                             }
+                            KineticScroll { flickable: edAreaScroll.contentItem }
                         }
                         Text {
                             textFormat: Text.PlainText
@@ -5200,6 +5205,7 @@ ShellRoot {
                     contentHeight: setSheet.implicitHeight
                     clip: true
                     ScrollBar.vertical: AppScrollBar {}
+                    KineticScroll { flickable: setFlick }
 
                 ColumnLayout {
                     id: setSheet
