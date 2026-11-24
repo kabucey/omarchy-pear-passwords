@@ -1551,24 +1551,29 @@ ShellRoot {
             root.diagBusy = false;
             if (d.error) { root.diagText = root.errorWords(d); return; }
             const rep = d.report || {};
-            const lines = [];
-            const show = function (scope, zones) {
-                Object.keys(zones || {}).sort().forEach(function (z) {
-                    const v = zones[z] || {};
-                    if (v.error) {
-                        lines.push(scope + "  " + z + "  error " + (v.error.code === null ? "" : v.error.code)
-                                   + " " + (v.error.type || "") + ": " + (v.error.description || ""));
+            const lines = ["container  " + (rep.container || "?")];
+            if (rep.error) lines.push("error " + rep.error.code + " " + rep.error.type + ": " + rep.error.description);
+            ["private", "shared"].forEach(function (label) {
+                const db = (rep.databases || {})[label];
+                if (!db) return;
+                if (db.error) {
+                    lines.push(label + "  error " + db.error.code + " " + db.error.type + ": " + db.error.description);
+                    return;
+                }
+                lines.push(label + "  " + db.zones + " zones, " + (db.groups || []).length + " groups"
+                           + ((db.other_zone_names || []).length ? "  (other: " + db.other_zone_names.join(", ") + ")" : ""));
+                (db.groups || []).forEach(function (g) {
+                    if (g.error) {
+                        lines.push("  group " + g.group + "  error " + g.error.code + " " + g.error.type + ": " + g.error.description);
                         return;
                     }
-                    const types = Object.keys(v.types || {}).map(function (t) { return v.types[t] + " × " + t; });
-                    lines.push(scope + "  " + z + "  " + (v.records || 0) + " records"
-                               + (types.length ? "  (" + types.join(", ") + ")" : ""));
-                    if ((v.fields || []).length) lines.push("    fields: " + v.fields.join(", "));
+                    const types = Object.keys(g.types || {}).map(function (t) { return g.types[t] + " × " + t; });
+                    lines.push("  group " + g.group + (g.owned_by_you ? " (yours)" : " (joined)") + "  "
+                               + g.records + " records" + (types.length ? "  (" + types.join(", ") + ")" : ""));
+                    if ((g.fields || []).length) lines.push("    fields: " + g.fields.join(", "));
                 });
-            };
-            show("private", rep.private_zones);
-            show("shared ", rep.shared);
-            root.diagText = lines.length ? lines.join("\n") : "iCloud returned nothing for any candidate zone.";
+            });
+            root.diagText = lines.join("\n");
         });
     }
     onSettingsOpenChanged: if (root.settingsOpen && root.phase === "ready") root.loadFeatures()

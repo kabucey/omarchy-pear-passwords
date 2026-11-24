@@ -584,9 +584,10 @@ the next grant; `idle_lock_s` restarts the idle clock.
   -> {"rid":29,"available":true,"items":[{"class":"keys","agrp":"com.apple.webkit.webauthn",
       "count":22,"keys":["agrp","class","klbl","labl","v_Data"],"inner_keys":[]}]}
 {"op":"diag-sharing","rid":30}
-  -> {"rid":30,"report":{"private_zones":{"Passwords":{"records":512,"types":{"item":512},
-      "fields":["data","uuid"]}},"shared":{"Passwords@db2":{"error":{"type":"CloudKitError",
-      "code":26,"description":"..."}}}}}
+  -> {"rid":30,"report":{"container":"com.apple.security.shared.keychain","databases":{
+      "private":{"zones":3,"other_zone_names":["_defaultZone"],"groups":[{"group":1,
+      "owned_by_you":true,"records":12,"types":{"item":11,"cloudkit.share":1},"fields":[...]}]},
+      "shared":{"zones":4,"other_zone_names":[],"groups":[...]}}}}
 ```
 
 - `features`: the categories that wait for a check on a real keychain, `passkeys` and
@@ -603,11 +604,11 @@ the next grant; `idle_lock_s` restarts the idle clock.
   categories are turned on.
 - `diag-sharing`: needs tier 1, a signed-in account, raises `.manage`; `busy-sync` while a
   sync, sign-in or edit runs. **Read-only**: runs `OctagonClient.probe_sharing` (section
-  "Shared groups"), which sends only RecordRetrieveChanges, the fetch every sync makes, for
-  candidate zone names in the private database and in the shared database scope. No save,
-  no delete, no sync token kept, nothing reaches the vault. The report is record types,
-  counts, field names and error codes per zone, **never a value**. It exists to find where
-  Apple Passwords shared groups live on the owner's account.
+  "Shared groups"), which sends only op 203 (list a database's zones) and op 213 (a zone's
+  records, the fetch every sync makes) to the shared-keychain container, in the private and
+  the shared database. No save, no delete, nothing decrypted, no sync token kept, nothing
+  reaches the vault. The report is zone and group counts, whether each group is yours, and
+  record types, counts and field names per group: **never a value or a group id**.
 
 ## 7. clip ops (role `clip`)
 
@@ -956,8 +957,8 @@ traceback.
 
 ## 14. Shared password groups (not synced yet)
 
-Passwords in an Apple Passwords shared group (iOS 17 / macOS 14) are not in the private CKKS zones this client fetches (`ckks.KEYCHAIN_ZONES`), so they are absent from the vault. Keychain sharing is implemented by Apple's closed-source KCSharing (mach service `com.apple.security.kcsharing`); the public Security sources carry only a stub listener (`keychain/securityd/KCSharingStubXPCListenerDelegate.m`). Zone names, per-group key distribution and share record layout are unpublished and unverified here.
+Passwords in an Apple Passwords shared group (iOS 17 / macOS 14) are not in the CKKS keychain zones this client syncs, so they are absent from the vault. They live in their own CloudKit container, `com.apple.security.shared.keychain` (bundle `com.apple.security.kcsharing`), one zone per group named `group-<UUID>`: groups you created in your private database (header `targetDatabase` 1), groups you joined in your shared database (3; 2 is the public database). Each zone's records are an `item` per password and one `cloudkit.share`, encrypted with keys carried in the zone's PCS protection info (Sank6/iCloud-Keychain-for-Linux, MIT, RESEARCH.md, documents and implements the owned-group path).
 
-`OctagonClient.probe_sharing` is a read-only diagnostic, never used by sync. It tries RecordRetrieveChanges against guessed zone names in the private database and, with `x-cloudkit-databasescope: Shared` and each candidate database enum value, in the shared database. It logs only record types, counts, field names and error codes via `diag`. Nothing is written to iCloud and nothing reaches the vault.
+`OctagonClient.probe_sharing` is a read-only diagnostic, never used by sync: ckAppInit for the container, then op 203 (ZoneRetrieveChanges) in each database and op 213 (RecordRetrieveChanges) per group zone. It reports counts, record types and field names only, never a value or a zone's UUID. Nothing is written to iCloud and nothing reaches the vault.
 
 Live experiment: run the probe on an account with one owned and one joined group and read the debug log. A non-error shared-zone entry naming record types (`item`, `synckey`, `tlkshare`, share records) reveals the zone layout and the database enum. Only then write decryption, against a captured sample.

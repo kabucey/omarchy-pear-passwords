@@ -23,10 +23,6 @@ KEYCHAIN_ZONES = (
     "LimitedPeersAllowed", "SE-PTC", "Photos",
 )
 
-# Names worth probing for shared password groups. GUESSES: Apple's KCSharing is closed source
-# (only a stub XPC listener is in apple-oss-distributions/Security), so real names are unknown.
-SHARING_PROBE_ZONES = ("Passwords", "Sharing", "KCSharing", "SharedPasswords")
-
 CREDENTIAL_ZONES = frozenset(("Passwords", "Manatee"))
 
 ID_TYPE_RECORD = 1
@@ -50,6 +46,28 @@ VT_BYTES, VT_DATE, VT_STRING, VT_REFERENCE, VT_INT64, VT_DOUBLE = 1, 2, 3, 5, 7,
 # reverse-engineered from and is known to be accepted by Apple.
 SAVE_SEMANTICS_CREATE = 2
 SAVE_SEMANTICS_UPDATE = 3
+
+
+def parse_zone_changes_response(raw: bytes) -> dict:
+    """RetrieveZoneChangesResponse -> {zones, continuation_token, status}; status 2 = done.
+    Each zone: {name, owner, change_type (2 = deleted), raw (the RecordZoneIdentifier, to
+    address the zone verbatim)}. Shape from Sank6/iCloud-Keychain-for-Linux (MIT)."""
+    f = decode_fields(raw)
+    zones = []
+    for change in f.get(1, []):
+        cf = decode_fields(change)
+        zid = first(cf, 1)
+        if zid is None:
+            continue
+        zf = decode_fields(zid)
+        value, owner = first(zf, 1), first(zf, 2)
+        zones.append({
+            "name": first_str(decode_fields(value), 1, "") if value is not None else "",
+            "owner": first_str(decode_fields(owner), 1, "") if owner is not None else "",
+            "change_type": first(cf, 2, 0),
+            "raw": zid,
+        })
+    return {"zones": zones, "continuation_token": first(f, 2), "status": first(f, 3)}
 
 
 def summarize_records(records) -> dict:

@@ -38,10 +38,20 @@ CUTTLEFISH_SERVICE = "Cuttlefish"
 
 ENV_PRODUCTION = 1
 DB_PRIVATE = 1
-# Protobuf enum for header field 23. Only 1 (private) is confirmed. The shared value is NOT
-# known: CKDatabaseScope in the public API is public=1/private=2/shared=3, which does not match
-# this wire enum, so the probe tries each candidate. See docs/protocol.md "Shared groups".
-DB_SHARED_CANDIDATES = (2, 3)
+# Header field 23 (targetDatabase): PRIVATE_DB = 1, PUBLIC_DB = 2, SHARED_DB = 3 (CloudKit's
+# CloudDB proto as published in horrorho/InflatableDonkey's cloud_kit.proto). Confirmed live:
+# 3 answers "Only shared zones can be accessed in the shared DB".
+DB_SHARED = 3
+# Apple Passwords shared groups: their own container, one zone per group ("group-<UUID>"), in
+# the owner's private database and in each participant's shared database. Names from
+# Sank6/iCloud-Keychain-for-Linux (MIT), RESEARCH.md "Shared password groups".
+KCSHARING_CONTAINER = "com.apple.security.shared.keychain"
+KCSHARING_BUNDLE = "com.apple.security.kcsharing"
+CKDATABASE_ZONE_SYNC_URL = "https://gateway.icloud.com/ckdatabase/api/client/zone/sync"
+# Operation.Type ZONE_RETRIEVE_CHANGES_TYPE = 203: list a database's zones. A FETCH. (200 is
+# zone save and 202 zone delete: never sent by anything here.)
+OP_TYPE_ZONE_RETRIEVE_CHANGES = 203
+FIELD_ZONE_RETRIEVE_CHANGES = 203
 ISOLATION_ZONE = 1
 IDENTIFIER_TYPE_DEVICE = 2
 OP_TYPE_FUNCTION_INVOKE = 1101
@@ -311,13 +321,22 @@ class CloudKitTransport:
             ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=SECURITYD_BUNDLE)
         return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""
 
-    def probe_shared_records(self, zone_request_bytes: bytes, database: int) -> bytes:
-        """LIVE, READ-ONLY, DIAGNOSTIC. RecordRetrieveChanges against the SHARED database scope.
+    def probe_zone_changes(self, continuation: bytes | None, *, bundle: str, database: int,
+                           scope: str) -> bytes:
+        """LIVE, READ-ONLY, DIAGNOSTIC. ZoneRetrieveChanges (op 203): the zones in a database.
+        Never used by sync."""
+        req = Writer().bytes(1, continuation).finish()
+        result = self._perform(
+            CKDATABASE_ZONE_SYNC_URL, OP_TYPE_ZONE_RETRIEVE_CHANGES,
+            FIELD_ZONE_RETRIEVE_CHANGES, req, bundle=bundle, database=database, scope=scope)
+        return result.field(FIELD_ZONE_RETRIEVE_CHANGES) or b""
 
-        Never used by sync. `database` is a candidate wire value (DB_SHARED_CANDIDATES) because
-        the real one is unconfirmed. The only operation sent is a fetch."""
+    def probe_records(self, zone_request_bytes: bytes, *, bundle: str, database: int,
+                      scope: str) -> bytes:
+        """LIVE, READ-ONLY, DIAGNOSTIC. RecordRetrieveChanges (op 213, the fetch every sync
+        makes) in any database and bundle. Never used by sync."""
         result = self._perform(
             CKDATABASE_SYNC_URL, ckks.OP_TYPE_RECORD_RETRIEVE_CHANGES,
-            ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=SECURITYD_BUNDLE,
-            database=database, scope="Shared")
+            ckks.FIELD_RETRIEVE_CHANGES, zone_request_bytes, bundle=bundle,
+            database=database, scope=scope)
         return result.field(ckks.FIELD_RETRIEVE_CHANGES) or b""

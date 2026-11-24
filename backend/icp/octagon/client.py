@@ -303,27 +303,67 @@ class OctagonClient:
                 f"keychain sync incomplete; refusing to update the vault ({details})")
         return grouped
 
-    def probe_sharing(self, candidate_zones=ckks.SHARING_PROBE_ZONES) -> dict:
-        """READ-ONLY diagnostic for shared password groups; returns a redacted report and never
-        feeds the vault. Item data is not decoded: only record types, counts, field names and
-        error codes are kept. Shared-group zone names are not public (KCSharing is closed
-        source), so this can only try guessed names; the report shows what Apple answered."""
-        report: dict = {"private_zones": {}, "shared": {}}
-        for zone in candidate_zones:
-            zid = ckks.record_zone_identifier(zone, self.user_id)
-            req = ckks.build_retrieve_changes_request(zid)
+    def probe_sharing(self) -> dict:
+        """READ-ONLY diagnostic for Apple Passwords shared groups; never feeds the vault.
+
+        Groups live in their own container (cloudkit.KCSHARING_CONTAINER), one "group-<UUID>"
+        zone each: groups you own in your private database, groups you joined in your shared
+        database. For each database this lists the zones (op 203) and, for each group zone,
+        fetches its records (op 213, the fetch every sync makes) and keeps only record types,
+        counts and field names. Nothing is decrypted, saved or deleted; no sync token is kept.
+        Zone names are reduced to a count and an index, never the group's UUID."""
+        report: dict = {"container": cloudkit.KCSHARING_CONTAINER, "databases": {}}
+        try:
+            kc_user = cloudkit.ck_app_init(cloudkit.KCSHARING_CONTAINER, cloudkit.KCSHARING_BUNDLE,
+                                           self.mme_dsid, self.mme_token, self.anisette)
+        except Exception as e:  # noqa: BLE001 - diagnostics must not raise
+            report["error"] = _err_summary(e)
+            diag.dump(logging.getLogger(__name__), "sharing probe", report)
+            return report
+        transport = cloudkit.CloudKitTransport(self.ck_token, kc_user, self.transport.device,
+                                               self.anisette,
+                                               container=cloudkit.KCSHARING_CONTAINER)
+        for label, db, scope in (("private", cloudkit.DB_PRIVATE, "Private"),
+                                 ("shared", cloudkit.DB_SHARED, "Shared")):
+            out: dict = {}
+            report["databases"][label] = out
+            zones, continuation = [], None
             try:
-                page = ckks.parse_retrieve_changes_response(self.transport.fetch_records(req))
-                report["private_zones"][zone] = ckks.summarize_records(page["records"])
-            except Exception as e:  # noqa: BLE001 - diagnostics must not raise
-                report["private_zones"][zone] = {"error": _err_summary(e)}
-            for db in cloudkit.DB_SHARED_CANDIDATES:
+                for _ in range(25):
+                    page = ckks.parse_zone_changes_response(transport.probe_zone_changes(
+                        continuation, bundle=cloudkit.KCSHARING_BUNDLE, database=db, scope=scope))
+                    zones.extend(page["zones"])
+                    continuation = page.get("continuation_token")
+                    if page.get("status") == 2 or not continuation:
+                        break
+            except Exception as e:  # noqa: BLE001
+                out["error"] = _err_summary(e)
+                continue
+            deleted = {z["name"] for z in zones if z.get("change_type") == 2}
+            live = [z for z in zones if z["name"] not in deleted]
+            groups = [z for z in live if z["name"].startswith("group-")]
+            out["zones"] = len(live)
+            out["other_zone_names"] = sorted({z["name"] for z in live
+                                              if not z["name"].startswith("group-")})[:20]
+            out["groups"] = []
+            for i, z in enumerate(groups, 1):
+                g: dict = {"group": i, "owned_by_you": z.get("owner") in ("", kc_user,
+                                                                         "__defaultOwner__")}
                 try:
-                    raw = self.transport.probe_shared_records(req, db)
-                    page = ckks.parse_retrieve_changes_response(raw)
-                    report["shared"][f"{zone}@db{db}"] = ckks.summarize_records(page["records"])
+                    records, cont = [], None
+                    for _ in range(50):
+                        raw = transport.probe_records(
+                            ckks.build_retrieve_changes_request(z["raw"], cont),
+                            bundle=cloudkit.KCSHARING_BUNDLE, database=db, scope=scope)
+                        pg = ckks.parse_retrieve_changes_response(raw)
+                        records.extend(pg["records"])
+                        cont = pg.get("continuation_token")
+                        if pg.get("status") != 1 or not cont:
+                            break
+                    g.update(ckks.summarize_records(records))
                 except Exception as e:  # noqa: BLE001
-                    report["shared"][f"{zone}@db{db}"] = {"error": _err_summary(e)}
+                    g["error"] = _err_summary(e)
+                out["groups"].append(g)
         diag.dump(logging.getLogger(__name__), "sharing probe", report)
         return report
 
