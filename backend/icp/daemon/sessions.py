@@ -19,7 +19,9 @@ the things that must be decided in exactly one place:
   store methods (a sync). New run_store calls for the uid are refused until then. Never a
   half-applied sync, never a meta.v2 sealed from a wiped doc.
 - run_store(): blocking UserStore and Apple calls go to a worker thread under the uid's store
-  lock, and wipe the keys again on the way out when a lock landed meanwhile.
+  lock, and wipe the keys again on the way out when a lock landed meanwhile. The one-entry
+  reads behind Copy and Show (CONCURRENT_READ_CALLS) skip that lock and rely on the store's own
+  per-method mutex, so they never wait out a sync's network round trip.
 """
 
 from __future__ import annotations
@@ -51,6 +53,12 @@ ANISETTE_URL = "http://127.0.0.1:6969"
 # UserStore methods that read no key and hold no store mutex (plaintext files and flags only).
 KEYLESS_STORE_CALLS = frozenset({"status", "state", "load_settings", "holds_nothing",
                                  "create_blocked"})
+# One-entry reads that may run beside a store call already in progress (run_store reads=True),
+# instead of queueing behind it: a sync holds the store lock for its whole network round trip,
+# and Copy/Show waited all that time. Each is one @_serialized UserStore method, so the store's
+# own mutex still keeps it apart from apply_sync, and a lock landing meanwhile wipes the keys
+# the moment the running method returns, exactly as for any other call.
+CONCURRENT_READ_CALLS = frozenset({"get_meta", "open_entry"})
 
 
 # --- the request being handled --------------------------------------------------------------
@@ -186,6 +194,13 @@ def validate_features(d) -> dict:
 def setting_ok(key: str, value) -> bool:
     if key == "window_mode":
         return isinstance(value, str) and value in protocol.WINDOW_MODES
+    if key == "generator":
+        from ..vault.generate import StyleError, parse_style
+        try:
+            parse_style(value)
+        except StyleError:
+            return False
+        return True
     if isinstance(value, bool) or not isinstance(value, int):
         return False
     if key == "grant_s":
@@ -304,10 +319,25 @@ class Registry:
             return NO_AGENT
 
     async def run_store(self, uid: int, fn: Callable[..., Any], *args: Any,
-                        keyless: bool = False, replaces: bool = False) -> Any:
+                        keyless: bool = False, replaces: bool = False,
+                        reads: bool = False) -> Any:
         s = self.sessions.get(uid)
         if s is None:
             raise OpError("internal")
+        if reads:
+            # Only the store's own one-entry reads, as bound on the store in use right now.
+            if not any(fn == getattr(s.store, name, None) for name in CONCURRENT_READ_CALLS):
+                raise OpError("internal")
+            # Not while the store object itself is being replaced (create/reset), and not once
+            # a lock is waiting for the running call: then "locked", as below.
+            if s.wipe_after or s.replacing:
+                raise OpError("locked")
+            epoch = s.epoch
+            try:
+                return await self._in_pool(self._store_pool, fn, *args)
+            finally:
+                if s.wipe_after or (s.epoch != epoch and not s.unlocked()):
+                    self._wipe_store(s)
         if keyless:
             # status/state/load_settings/holds_nothing/create_blocked read no key and take no
             # store mutex, so

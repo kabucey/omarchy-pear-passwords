@@ -139,6 +139,17 @@ ShellRoot {
     property bool everConnected: false
 
     // The screen follows from the above; nothing else decides it.
+    // ---- window width: the shown account comes first. The list gives up width before the
+    // details do (380 down to 260), and below singlePaneBelow one pane shows at a time: the
+    // list, or the account you opened (click, Tab), with a way back (the back link, Esc, Left).
+    // A click opens it at any width, so making the window narrower keeps what you were reading.
+    readonly property int singlePaneBelow: 700
+    readonly property bool singlePane: win.width < root.singlePaneBelow
+    property bool narrowDetail: false
+    readonly property bool showList: !root.singlePane
+        || (root.screen === "list" && root.entries.length > 0 && !(root.narrowDetail && !!root.selected))
+    readonly property bool showDetail: !root.singlePane || !root.showList
+    readonly property int listWidth: Math.round(Math.max(260, Math.min(380, win.width * 0.34)))
     readonly property string screen: {
         if (root.phase !== "ready") return root.phase;
         if (root.migrateStep !== "") return "migrate";
@@ -228,7 +239,12 @@ ShellRoot {
     property string editorError: ""
     property var totpPreview: ({})
     property bool createMore: false
-    property bool createGenerate: false
+    property bool createGenerate: false          // crPass holds a drawn password, shown, with options
+    // ---- password generator: the daemon draws (QML has no secure random source); the style is
+    // the `generator` setting, a string vault/generate.py checks ("apple", "random:20:ds", "pin:6")
+    property int genSeq: 0                       // drops a draw that a newer one or "type my own" overtook
+    property real genBits: 0
+    property var genLast: ({ random: "random:20:ds", pin: "pin:6" })   // each style's last options
     // ---- tags: an inline chip editor in the detail pane, inside the account's grant
     property bool tagEditing: false
     property var tagDraft: []
@@ -418,10 +434,12 @@ ShellRoot {
             return;
         case "clip":
             if (m.outcome === "failed" && Date.now() - root.clipFailAt < 5000) return;
-            root.showFlash(root.clipWords(m.field) + (m.outcome === "pasted" ? " pasted — now cleared"
+            // Withdrawn means a newer copy (or a lock) replaced it: the newer one speaks.
+            if (m.outcome === "withdrawn") return;
+            root.showFlash(root.clipWords(m.field) + (m.outcome === "pasted"
+                             ? (m.reader ? " pasted into " + m.reader + " — now cleared" : " pasted — now cleared")
                          : m.outcome === "expired" ? " cleared from the clipboard"
                          : m.outcome === "replaced" ? " replaced by something you copied"
-                         : m.outcome === "withdrawn" ? " taken back off the clipboard"
                          : " couldn't be put on the clipboard"));
             return;
         case "autofill":
@@ -675,6 +693,8 @@ ShellRoot {
             function fail(reason) {
                 if (clipProc.offered || clipProc.failed) return;
                 clipProc.failed = true;
+                if (root.clipLatest !== clipProc) return;   // a newer copy took over: not a failure
+                root.copyPending = "";
                 root.clipFailed(reason);
             }
             stdout: SplitParser {
@@ -685,6 +705,7 @@ ShellRoot {
                     if (!m) return;
                     if (m.event === "offered" && !clipProc.failed && !clipProc.offered) {
                         clipProc.offered = true;
+                        if (root.clipLatest === clipProc) root.copyPending = "";
                         root.clipFailAt = 0;
                         root.showFlash(clipProc.words + " copied — clears after one paste or "
                                        + (root.settings.clip_timeout_s || 30) + " s");
@@ -709,6 +730,7 @@ ShellRoot {
                               : code === 77 ? "the clipboard helper was refused (pear-exec 77)"
                               : "the clipboard helper stopped (exit " + code + ")");
                 root.clipDone(clipProc);
+                if (root.clipLatest === clipProc) { root.clipLatest = null; root.copyPending = ""; }
                 destroy();
             }
         }
@@ -854,7 +876,7 @@ ShellRoot {
             root.send("copy-text", bound ? { source: source, id: id, text: text }
                                          : { source: source, text: text }, function (d) {
                 if (d.error) { root.showFlash(root.errorWords(d)); return; }
-                clipComponent.createObject(root, { ticket: d.ticket, words: "Selection", running: true });
+                root.clipLatest = clipComponent.createObject(root, { ticket: d.ticket, words: "Selection", running: true });
             });
         };
         if (bound) root.withGrant(go); else go();
@@ -960,14 +982,30 @@ ShellRoot {
     // ---------------------------------------------------------------- the account grant
     // Everything that shows or changes a secret runs through here: if this account is not
     // open, the daemon opens its temporary buffer using this window's unlocked session.
+    // A second press while this account is still opening does not ask again: the daemon would
+    // cancel the first request and start the wait over (a sync holds the store for seconds,
+    // right after unlock most of all), so pressing Copy twice took longer than once. The newest
+    // action waits for the one grant instead.
+    property var grantAfter: null
+    property int grantSeq: 0                     // a reply for a request since replaced is ignored
     function withGrant(after) {
         if (!root.selected) return;
         if (root.unlocked) { if (after) after(); return; }
         const id = root.selectedId;
         const name = root.selected.primary;
+        root.grantAfter = after || null;
+        if (root.granting) return;
         root.granting = true;
-        root.status = "opening " + name + "…";
+        root.status = root.syncing ? "opening " + name + " once the sync finishes…" : "opening " + name + "…";
+        const mine = ++root.grantSeq;
         root.grantRid = root.send("grant", { id: id }, function (d) {
+            if (mine !== root.grantSeq) {           // another account was chosen meanwhile
+                // Give it back unless a newer grant is open or on its way (a release would end that).
+                if (!d.error && root.grantId === "" && !root.granting) root.send("release", {}, null);
+                return;
+            }
+            const then = root.grantAfter;
+            root.grantAfter = null;
             root.granting = false;
             root.grantRid = -1;
             if (d.error) {
@@ -980,7 +1018,7 @@ ShellRoot {
             root.grantSingleUse = !!d.single_use;
             root.grantExpires = d.expires || 0;
             root.grantLeft = root.grantSingleUse ? 0 : Math.max(0, Math.ceil(root.grantExpires - Date.now() / 1000));
-            if (after) after();
+            if (then) then();
         });
     }
 
@@ -1010,6 +1048,7 @@ ShellRoot {
         root.hideSecrets();
         root.notesText = ""; root.notesLoaded = false;
         root.confirming = false; root.changing = false; root.generateNew = false;
+        root.stopGenerating();
         root.renaming = false;
         if (!root.deleting) root.deleteConfirm = false;
         if (root.editorMode !== "create") {
@@ -1084,7 +1123,7 @@ ShellRoot {
     function select(e) {
         if (!e || e.id === root.selectedId) return;
         if (root.grantId !== "" || root.granting) root.send("release", {}, null);
-        root.granting = false;
+        root.granting = false; root.grantAfter = null; root.grantSeq++;
         root.tagKept = null;
         root.selected = e; root.selectedId = e.id;
         root.endGrant();
@@ -1106,19 +1145,71 @@ ShellRoot {
              : field === "text" ? "Selection" : "Username";
     }
 
-    function copyField(field) {
+    // A copy on its way to the clipboard ("id/field"), from the press until pear-clip has
+    // offered it or failed: pressing again meanwhile does nothing. A second copy would withdraw
+    // the first, whose "taken back" or "couldn't copy" then read like the press had failed.
+    property string copyPending: ""
+    property QtObject clipLatest: null          // the newest clip process; older ones stay quiet
+    Timer { id: copyPendingTimer; interval: 6000; onTriggered: root.copyPending = "" }
+    function copyField(field, retried) {
         if (!root.selected) return;
         if (field === "password" && root.selected.has_password === false) { root.showFlash(root.noPassword); return; }
         const id = root.selectedId;
+        const key = id + "/" + field;
+        if (root.copyPending === key) return;
         const go = function () {
+            if (root.copyPending === key) return;
+            root.copyPending = key;
+            copyPendingTimer.restart();
             root.send("copy", { id: id, field: field }, function (d) {
-                if (d.error) { root.status = d.error === "no-grant" || d.error === "grant-expired"
-                                   ? "that account closed — open it again" : d.error; return; }
-                clipComponent.createObject(root, { ticket: d.ticket, words: root.clipWords(field),
-                                                   running: true });
+                if (d.error) {
+                    root.copyPending = "";
+                    // The account's buffer ran out between this window's countdown and the
+                    // daemon's: open it again and copy, rather than asking for a second press.
+                    if ((d.error === "no-grant" || d.error === "grant-expired") && !retried
+                            && id === root.selectedId) {
+                        root.endGrant();
+                        root.copyField(field, true);
+                        return;
+                    }
+                    root.status = d.error === "no-grant" || d.error === "grant-expired"
+                                  ? "that account closed — open it again" : d.error;
+                    return;
+                }
+                root.clipLatest = clipComponent.createObject(root, { ticket: d.ticket, words: root.clipWords(field),
+                                                                     running: true });
             });
         };
-        if (field === "password" || field === "code" || field === "notes") root.withGrant(go); else go();
+        if (field === "password" || field === "code" || field === "notes")
+            root.withGrant(function () { root.whenFocused(go); });
+        else go();
+    }
+
+    // A copy waits until this window has the keyboard again. Opening an account goes through
+    // the shell's polkit prompt, and its password field (Qt) reads the clipboard text the moment
+    // the selection changes while it still has focus. pear-clip counted that read as the one
+    // paste, so the first copy after a prompt pasted nothing. Pear's own reads are never served,
+    // so once Pear is focused the offer waits for the real paste. Without Hyprland the copy goes
+    // ahead after a moment anyway.
+    property var afterFocus: null
+    Timer { id: afterFocusTimer; interval: 1500; onTriggered: root.runAfterFocus() }
+    function whenFocused(fn) {
+        if (Qt.application.state === Qt.ApplicationActive) { fn(); return; }
+        root.afterFocus = fn;
+        focusProc.running = true;
+        afterFocusTimer.restart();
+    }
+    function runAfterFocus() {
+        const fn = root.afterFocus;
+        root.afterFocus = null;
+        afterFocusTimer.stop();
+        if (fn) fn();
+    }
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state === Qt.ApplicationActive && root.afterFocus) root.runAfterFocus();
+        }
     }
     function copyPassword() { root.copyField("password"); }
 
@@ -1201,8 +1292,8 @@ ShellRoot {
         });
     }
 
-    // The new password is either typed here or generated by the daemon; a generated one never
-    // comes to this window unless you reveal it afterwards.
+    // The new password is typed here or drawn by the daemon into the field (shown, so it can be
+    // checked, edited or drawn again); either way the window sends it as the password.
     // Deletes the selected entry from iCloud Keychain, everywhere. Only after the inline
     // confirmation; the daemon then raises its own dialog (fingerprint or password).
     function deleteSelected() {
@@ -1228,16 +1319,15 @@ ShellRoot {
 
     function commitChange() {
         const pw = newPw.text;
-        const gen = root.generateNew;
         root.confirming = false;
+        root.stopGenerating();
         root.status = "pushing to iCloud…";
-        root.setFields(gen ? {} : { password: pw }, gen ? { generate: {} } : null, function (d) {
+        root.setFields({ password: pw }, null, function (d) {
             root.status = "";
             newPw.text = ""; root.revealed = ""; root.historyRows = []; root.historyLoaded = false;
             root.changing = false; root.generateNew = false;
             if (d.error) { root.status = root.errorWords(d); return; }
-            root.showFlash(gen ? "changed to a new generated password on all your devices — reveal it to see it"
-                               : "changed on all your devices");
+            root.showFlash("changed on all your devices");
         });
     }
 
@@ -1659,6 +1749,7 @@ ShellRoot {
     function openEditor(mode) {
         root.editorMode = mode; root.editorError = ""; root.totpPreview = ({});
         root.editorBusy = false; root.createMore = false; root.createGenerate = false;
+        root.stopGenerating();
         edArea.text = mode === "sites" ? (root.selected ? (root.selected.own_sites || root.selected.sites || []).join("\n") : "")
                     : mode === "notes" ? root.notesText : "";
         edSetup.text = "";
@@ -1676,6 +1767,7 @@ ShellRoot {
     function closeEditor() {
         if (root.editorBusy) return;
         root.editorOpen = false;
+        root.stopGenerating();
         edArea.text = ""; crPass.text = "";
     }
 
@@ -1692,7 +1784,7 @@ ShellRoot {
         if (root.editorBusy) return false;
         if (root.editorMode === "totp") return !!root.totpPreview.code;
         if (root.editorMode === "create")
-            return (crPass.text.length > 0 || root.createGenerate)
+            return crPass.text.length > 0
                    && (crSite.text.trim().length > 0 || crName.text.trim().length > 0)
                    && (!crSetup.text.trim() || !!root.totpPreview.code)
                    && crTags.acceptableInput && root.parseTags(crTags.text) !== null;
@@ -1726,8 +1818,8 @@ ShellRoot {
             if (crSetup.text.trim()) f.totp = { setup: crSetup.text.trim() };
             const tags = root.parseTags(crTags.text) || [];
             if (tags.length) f.tags = tags;
-            if (!root.createGenerate) f.password = crPass.text;
-            root.send("create", root.createGenerate ? { fields: f, generate: {} } : { fields: f },
+            f.password = crPass.text;
+            root.send("create", { fields: f },
                       function (d) {
                           if (!d.error && d.id) root.selectedId = "";
                           done(d);
@@ -1748,6 +1840,59 @@ ShellRoot {
         root.send("totp-preview", { setup: text }, function (d) {
             root.totpPreview = d && d.code ? d : ({ error: "" });
         });
+    }
+    function genStyle() {
+        const s = root.settings.generator;
+        return typeof s === "string" && s ? s : "apple";
+    }
+    function genParts(style) {
+        const p = String(style).split(":");
+        if (p[0] === "random")
+            return { kind: "random", length: parseInt(p[1]) || 20,
+                     digits: (p[2] || "").indexOf("d") >= 0, symbols: (p[2] || "").indexOf("s") >= 0 };
+        if (p[0] === "pin") return { kind: "pin", length: parseInt(p[1]) || 6, digits: true, symbols: false };
+        return { kind: "apple", length: 20, digits: true, symbols: false };
+    }
+    function genCompose(kind, length, digits, symbols) {
+        if (kind === "pin") return "pin:" + Math.max(4, Math.min(12, Math.round(length)));
+        if (kind === "random")
+            return "random:" + Math.max(8, Math.min(64, Math.round(length))) + ":"
+                   + (digits ? "d" : "") + (symbols ? "s" : "");
+        return "apple";
+    }
+    // Draw a password into `field` (crPass or newPw); it is shown there and can be edited.
+    function generateInto(field, style) {
+        const seq = ++root.genSeq;
+        root.send("generate", { style: style || root.genStyle() }, function (d) {
+            if (seq !== root.genSeq) return;
+            if (d.error) { root.showFlash(root.errorWords(d)); return; }
+            field.text = d.password;
+            root.genBits = d.bits || 0;
+        });
+    }
+    // Keep a style as the setting (shown at once, saved by the daemon) without drawing.
+    function keepGenStyle(style) {
+        if (style === root.genStyle()) return;
+        const kind = root.genParts(style).kind;
+        if (kind !== "apple") {
+            const last = Object.assign({}, root.genLast);
+            last[kind] = style;
+            root.genLast = last;
+        }
+        root.settings = Object.assign({}, root.settings, { generator: style });
+        root.setSetting("generator", style);
+    }
+    function setGenStyle(style, field) {
+        root.keepGenStyle(style);
+        root.generateInto(field, style);
+    }
+    function stopGenerating() { root.genSeq++; root.genBits = 0; }
+    function genStrength(bits) {
+        // Apple's own shape is about 68 bits: far past any online guessing, so it reads Strong.
+        if (bits >= 90) return "Very strong";
+        if (bits >= 60) return "Strong";
+        if (bits >= 40) return "Fair";
+        return "Weak";
     }
     function groupCode(c) { return c && c.length === 6 ? c.slice(0, 3) + " " + c.slice(3) : (c || ""); }
 
@@ -2118,12 +2263,17 @@ ShellRoot {
     function enterPanel(at) {
         if (!root.selected || !root.appUnlocked) return;
         root.panelFocus = true;
+        root.narrowDetail = true;
         root.detailIndex = at === undefined ? 0 : Math.max(0, Math.min(at, root.panelStops() - 1));
         detailKeys.forceActiveFocus();
     }
     function focusSearch() {
         if (!root.appUnlocked || root.editorOpen || root.settingsOpen || root.signinOpen
                 || root.tagEditing || root.renaming || root.confirming || root.deleteConfirm) return;
+        // Single-pane with an account up: the search field is hidden, so the keyboard goes to the
+        // account (Esc and Left still lead back to the list). Focus coming back to the window
+        // must not swap what you were reading for the list.
+        if (root.singlePane && root.narrowDetail && root.selected) { root.enterPanel(root.detailIndex); return; }
         root.panelFocus = false;
         search.forceActiveFocus();
     }
@@ -2155,6 +2305,7 @@ ShellRoot {
 
     function leavePanel() {
         root.panelFocus = false;
+        root.narrowDetail = false;
         search.forceActiveFocus();
     }
     function panelMove(delta) {
@@ -2226,6 +2377,119 @@ ShellRoot {
     }
     function isRecent(unix) { return unix && (Date.now() / 1000 - unix) < 30 * 86400; }
 
+    // The generator's options under a password field that holds a drawn password: the style,
+    // its length and character sets, and how strong the result is. Every change draws again.
+    component GeneratorOptions: ColumnLayout {
+        id: go
+        required property Item field
+        signal typeOwn()                             // back to typing one: masked and empty
+        readonly property var parts: root.genParts(root.genStyle())
+        property int dragLength: -1                  // while the slider is held
+        readonly property int length: dragLength >= 0 ? dragLength : parts.length
+        spacing: 8
+        Flow {
+            Layout.fillWidth: true
+            spacing: 6
+            Repeater {
+                model: [["apple", "Memorable"], ["random", "Random"], ["pin", "PIN"]]
+                delegate: AppButton {
+                    required property var modelData
+                    text: modelData[1]
+                    fontSize: Theme.fSmall
+                    active: go.parts.kind === modelData[0]
+                    onClicked: root.setGenStyle(modelData[0] === "apple" ? "apple" : root.genLast[modelData[0]],
+                                                go.field)
+                }
+            }
+            Text {
+                textFormat: Text.PlainText
+                height: 34
+                leftPadding: 8
+                verticalAlignment: Text.AlignVCenter
+                text: "type my own"
+                color: hTypeOwn.hovered ? Theme.fg : Theme.dim
+                font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
+                font.underline: hTypeOwn.hovered
+                HoverHandler { id: hTypeOwn; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: go.typeOwn() }
+            }
+        }
+        Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            visible: go.parts.kind === "apple"
+            text: "Apple's style: three groups of six letters, with one number and one capital"
+            color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
+            wrapMode: Text.Wrap
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            visible: go.parts.kind !== "apple"
+            spacing: 12
+            Text {
+                textFormat: Text.PlainText
+                text: "Length"
+                color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
+            }
+            O.PanelSlider {
+                Layout.fillWidth: true
+                integer: true
+                step: 1
+                minimum: go.parts.kind === "pin" ? 4 : 8
+                maximum: go.parts.kind === "pin" ? 12 : 64
+                value: go.parts.length
+                trackColor: Theme.border
+                fillColor: Theme.accent
+                knobColor: Theme.fg
+                // Draw as it moves; keep the length as the setting once it is let go.
+                onMoved: (v) => {
+                    const n = Math.round(v);
+                    if (n === go.length) return;
+                    go.dragLength = n;
+                    root.generateInto(go.field, root.genCompose(go.parts.kind, n, go.parts.digits, go.parts.symbols));
+                }
+                onReleased: (v) => {
+                    const style = root.genCompose(go.parts.kind, Math.round(v), go.parts.digits, go.parts.symbols);
+                    go.dragLength = -1;
+                    const drawn = style === root.genCompose(go.parts.kind, go.length, go.parts.digits, go.parts.symbols);
+                    root.keepGenStyle(style);
+                    if (!drawn) root.generateInto(go.field, style);
+                }
+            }
+            Text {
+                textFormat: Text.PlainText
+                Layout.preferredWidth: 24
+                horizontalAlignment: Text.AlignRight
+                text: String(go.length)
+                color: Theme.fg; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
+            }
+        }
+        Flow {
+            Layout.fillWidth: true
+            visible: go.parts.kind === "random"
+            spacing: 6
+            AppButton {
+                text: "Numbers"
+                fontSize: Theme.fSmall
+                active: go.parts.digits
+                onClicked: root.setGenStyle(root.genCompose("random", go.length, !go.parts.digits, go.parts.symbols), go.field)
+            }
+            AppButton {
+                text: "Symbols"
+                fontSize: Theme.fSmall
+                active: go.parts.symbols
+                onClicked: root.setGenStyle(root.genCompose("random", go.length, go.parts.digits, !go.parts.symbols), go.field)
+            }
+        }
+        Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            visible: root.genBits > 0
+            text: root.genStrength(root.genBits) + " · about " + Math.round(root.genBits) + " bits"
+            color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
+        }
+    }
+
     // A shortcut hint: the key in a hairline box, then what it does. Used by the status bar.
     component KeyHint: Row {
         id: kh
@@ -2267,7 +2531,7 @@ ShellRoot {
         // floating window); the minimum keeps a tiled or resized window usable.
         implicitWidth: 1200
         implicitHeight: 780
-        minimumSize: Qt.size(820, 560)
+        minimumSize: Qt.size(420, 480)
         color: Theme.bg
         // Hidden until the rules are in and the daemon has answered (or a moment has passed),
         // so a second launch that only raises the first window never flashes on screen.
@@ -2394,12 +2658,14 @@ ShellRoot {
                     // ------------------------------------------------ list
                     ColumnLayout {
                         id: listColumn
-                        Layout.fillWidth: false
-                        // 380, not 340: at 340 7% of usernames elided; at 380 none do. The list
-                        // is where the time goes - the panel mostly confirms what was picked.
-                        Layout.preferredWidth: 380
-                        Layout.minimumWidth: 380
-                        Layout.maximumWidth: 380
+                        // 380 when there is room (at 340 7% of usernames elided; at 380 none do),
+                        // down to 260 before the details give up any width; the whole window
+                        // in single-pane mode.
+                        visible: root.showList
+                        Layout.fillWidth: root.singlePane
+                        Layout.preferredWidth: root.singlePane ? -1 : root.listWidth
+                        Layout.minimumWidth: root.singlePane ? 0 : root.listWidth
+                        Layout.maximumWidth: root.singlePane ? Number.POSITIVE_INFINITY : root.listWidth
                         Layout.fillHeight: true
                         spacing: 0
                         // Typing while the pointer is over the search field or the list goes into
@@ -2558,7 +2824,12 @@ ShellRoot {
 
                                 HoverHandler { id: hov }
                                 TapHandler {
-                                    onTapped: { root.leavePanel(); root.cursor = lrow.index; root.select(lrow.modelData); }
+                                    onTapped: {
+                                        root.leavePanel(); root.cursor = lrow.index; root.select(lrow.modelData);
+                                        // At any width: a window made narrower later keeps this account up.
+                                        root.narrowDetail = true;
+                                        if (root.singlePane) root.enterPanel();    // open it: the list makes way
+                                    }
                                     onDoubleTapped: root.copyPassword()
                                 }
 
@@ -2704,7 +2975,10 @@ ShellRoot {
                         }
                     }
 
-                    Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: Theme.line }
+                    Rectangle {
+                        visible: root.showList && root.showDetail
+                        Layout.preferredWidth: 1; Layout.fillHeight: true; color: Theme.line
+                    }
 
                     // ------------------------------------------------ detail
                     //
@@ -2713,6 +2987,7 @@ ShellRoot {
                     // only light up under the pointer - what you can do with a row is shown
                     // when you point at it, not painted permanently on every one.
                     Item {
+                        visible: root.showDetail
                         Layout.fillWidth: true
                         Layout.fillHeight: true
 
@@ -2854,12 +3129,26 @@ ShellRoot {
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: 32
-                            anchors.rightMargin: 32
-                            anchors.topMargin: 28
+                            anchors.leftMargin: root.singlePane ? 16 : 32
+                            anchors.rightMargin: root.singlePane ? 16 : 32
+                            anchors.topMargin: root.singlePane ? 14 : 28
                             anchors.bottomMargin: 18
                             spacing: 0
                             visible: !!root.selected
+
+                            // ---- single-pane mode: the way back to the list
+                            Text {
+                                textFormat: Text.PlainText
+                                visible: root.singlePane
+                                Layout.bottomMargin: 12
+                                text: "‹  All passwords"
+                                color: hBack.hovered ? Theme.fg : Theme.dim
+                                font.family: Theme.uiFont
+                                font.pixelSize: Theme.fSmall
+                                font.underline: hBack.hovered
+                                HoverHandler { id: hBack; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.leavePanel() }
+                            }
 
                             // ---- identity: the chip, the name, one quiet line of facts
                             RowLayout {
@@ -3413,32 +3702,19 @@ ShellRoot {
                                         // primary selection away from the window).
                                         inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
                                         Layout.fillWidth: true
-                                        visible: !root.generateNew
                                         placeholderText: "New password"
-                                        password: true
+                                        password: !root.generateNew
                                         font.family: Theme.uiFont
                                         font.pixelSize: Theme.fBody
                                         onAccepted: if (text.length) root.confirming = true
                                     }
-                                    // A generated password is made by the daemon and never comes
-                                    // here unless you reveal it afterwards.
-                                    Text {
-                                        textFormat: Text.PlainText
-                                        Layout.fillWidth: true
-                                        visible: root.generateNew
-                                        text: "Pear will generate a strong password in Apple's style"
-                                        color: Theme.fg
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: Theme.fBody
-                                        elide: Text.ElideRight
-                                    }
                                     AppButton {
-                                        text: root.generateNew ? "Type one" : "Generate"
-                                        onClicked: { root.generateNew = !root.generateNew; newPw.text = ""; }
+                                        text: root.generateNew ? "New one" : "Generate"
+                                        onClicked: { root.generateNew = true; root.generateInto(newPw); }
                                     }
                                     AppButton {
                                         text: "Change…"
-                                        enabled: (newPw.text.length > 0 || root.generateNew) && !root.busy
+                                        enabled: newPw.text.length > 0 && !root.busy
                                         onClicked: root.confirming = true
                                     }
                                     Text {
@@ -3451,8 +3727,20 @@ ShellRoot {
                                             anchors.fill: parent
                                             anchors.margins: -8
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: { root.changing = false; newPw.text = ""; root.generateNew = false; }
+                                            onClicked: {
+                                                root.stopGenerating();
+                                                root.changing = false; newPw.text = ""; root.generateNew = false;
+                                            }
                                         }
+                                    }
+                                }
+                                GeneratorOptions {
+                                    Layout.fillWidth: true
+                                    visible: root.generateNew && !root.confirming
+                                    field: newPw
+                                    onTypeOwn: {
+                                        root.stopGenerating(); root.generateNew = false;
+                                        newPw.text = ""; newPw.forceActiveFocus();
                                     }
                                 }
 
@@ -3713,7 +4001,7 @@ ShellRoot {
                         Text {
                             textFormat: Text.PlainText
                             visible: root.unlocked
-                            Layout.maximumWidth: 260
+                            Layout.maximumWidth: root.singlePane ? 140 : 260
                             text: (root.selected ? root.selected.primary : "")
                                   + (root.grantSingleUse ? " open for one use" : " open " + root.clock(root.grantLeft))
                             color: Theme.accent
@@ -3724,7 +4012,9 @@ ShellRoot {
                         Text {
                             textFormat: Text.PlainText
                             visible: root.appUnlocked && root.signedIn
+                            // Short on a narrow window, so settings and lock stay on screen.
                             text: root.syncing ? "syncing…"
+                                : root.singlePane ? "sync"
                                 : root.syncedAt > 0 ? "synced " + root.agoShort(root.syncedAt) : "sync now"
                             color: hSync.hovered ? Theme.fg : Theme.dim
                             font.family: Theme.uiFont
@@ -3769,7 +4059,8 @@ ShellRoot {
                             TapHandler { onTapped: root.lockNow() }
                         }
                         Row {
-                            visible: root.entries.length > 0 && !root.unlocked
+                            // The hints give way first on a narrow window: the status text matters more.
+                            visible: root.entries.length > 0 && !root.unlocked && win.width >= 900
                             opacity: root.appUnlocked ? 1 : 0.45
                             spacing: 14
                             KeyHint { keys: "↑↓"; label: "move" }
@@ -4152,27 +4443,29 @@ ShellRoot {
                                 ContextMenu.menu: secretMenu
                                 ContextMenu.onRequested: secretMenu.aim(crPass, "create-password")
                                 Layout.fillWidth: true
-                                visible: !root.createGenerate
-                                password: true
+                                password: !root.createGenerate
                                 font.family: Theme.uiFont; font.pixelSize: Theme.fBody; verticalPadding: 9
                                 placeholderText: "Required"
                                 onAccepted: root.editorSave()
                             }
-                            Text {
-                                textFormat: Text.PlainText
-                                Layout.fillWidth: true
-                                visible: root.createGenerate
-                                text: "Pear will generate one"
-                                color: Theme.fg; font.family: Theme.uiFont; font.pixelSize: Theme.fBody
-                            }
                             AppButton {
-                                text: root.createGenerate ? "Type one" : "Generate"
-                                onClicked: { root.createGenerate = !root.createGenerate; crPass.text = ""; }
+                                text: root.createGenerate ? "New one" : "Generate"
+                                onClicked: { root.createGenerate = true; root.generateInto(crPass); }
+                            }
+                        }
+                        GeneratorOptions {
+                            Layout.row: 4; Layout.column: 1; Layout.fillWidth: true
+                            Layout.bottomMargin: 4
+                            visible: root.createGenerate
+                            field: crPass
+                            onTypeOwn: {
+                                root.stopGenerating(); root.createGenerate = false;
+                                crPass.text = ""; crPass.forceActiveFocus();
                             }
                         }
                         Text {
                             textFormat: Text.PlainText
-                            Layout.row: 4; Layout.column: 1
+                            Layout.row: 5; Layout.column: 1
                             Layout.topMargin: 4
                             visible: !root.createMore
                             text: "Add notes or a verification code"
@@ -4185,7 +4478,7 @@ ShellRoot {
                         }
                         Text {
                             textFormat: Text.PlainText
-                            Layout.row: 5; Layout.column: 0
+                            Layout.row: 6; Layout.column: 0
                             visible: root.createMore
                             text: "Notes"
                             color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
@@ -4201,20 +4494,20 @@ ShellRoot {
                             // No IME learning, no prediction (pear-exec also keeps input methods and the
                             // primary selection away from the window).
                             inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-                            Layout.row: 5; Layout.column: 1; Layout.fillWidth: true
+                            Layout.row: 6; Layout.column: 1; Layout.fillWidth: true
                             visible: root.createMore
                             font.family: Theme.uiFont; font.pixelSize: Theme.fBody; verticalPadding: 9
                             placeholderText: "Optional"
                         }
                         Text {
                             textFormat: Text.PlainText
-                            Layout.row: 6; Layout.column: 0
+                            Layout.row: 7; Layout.column: 0
                             visible: root.createMore
                             text: "Code"
                             color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
                         }
                         RowLayout {
-                            Layout.row: 6; Layout.column: 1; Layout.fillWidth: true
+                            Layout.row: 7; Layout.column: 1; Layout.fillWidth: true
                             visible: root.createMore
                             spacing: 10
                             O.TextField {
@@ -4242,14 +4535,14 @@ ShellRoot {
                         }
                         Text {
                             textFormat: Text.PlainText
-                            Layout.row: 7; Layout.column: 1
+                            Layout.row: 8; Layout.column: 1
                             visible: root.createMore && !!root.totpPreview.code
                             text: "Code now: " + root.groupCode(root.totpPreview.code)
                             color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
                         }
                         Text {
                             textFormat: Text.PlainText
-                            Layout.row: 8; Layout.column: 0
+                            Layout.row: 9; Layout.column: 0
                             visible: root.createMore
                             text: "Tags"
                             color: Theme.dim; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
@@ -4257,7 +4550,7 @@ ShellRoot {
                         // List metadata, not a secret (the notes' last line): an ordinary field.
                         O.TextField {
                             id: crTags
-                            Layout.row: 8; Layout.column: 1; Layout.fillWidth: true
+                            Layout.row: 9; Layout.column: 1; Layout.fillWidth: true
                             visible: root.createMore
                             font.family: Theme.uiFont; font.pixelSize: Theme.fBody; verticalPadding: 9
                             placeholderText: "work family (optional)"
@@ -4267,7 +4560,7 @@ ShellRoot {
                         // Why Add is off when the Tags field is what stops it: the chip editor's words.
                         Text {
                             textFormat: Text.PlainText
-                            Layout.row: 9; Layout.column: 1; Layout.fillWidth: true
+                            Layout.row: 10; Layout.column: 1; Layout.fillWidth: true
                             visible: root.createMore && text !== ""
                             text: root.tagsProblem(crTags.text)
                             color: Theme.danger; font.family: Theme.uiFont; font.pixelSize: Theme.fSmall
@@ -5818,6 +6111,7 @@ ShellRoot {
                 tagInput.text = "taxes";
             }
             if (mode === "detail" || mode === "shared") {
+                root.narrowDetail = true;
                 root.grantId = "demo1"; root.grantExpires = now + 118; root.grantLeft = 118;
                 root.revealed = "correct-horse-battery";
                 root.totpCode = "482913"; root.totpLeft = 21;

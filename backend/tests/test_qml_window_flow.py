@@ -308,6 +308,26 @@ DRIVER = r'''
                 root.closeEditor();
                 say(step);
 
+                step = "generate";
+                // Generate draws into the field at once, shown; options draw again; "type my own" clears.
+                root.openEditor("create");
+                crSite.text = "gen.example";
+                root.createGenerate = true; root.generateInto(crPass);
+                waitFor(function () { return crPass.text.length === 20; }, 10000, "apple draw");
+                check(/^[A-Za-z0-9]{6}-[A-Za-z0-9]{6}-[A-Za-z0-9]{6}$/.test(crPass.text), crPass.text);
+                check(!crPass.password && root.genBits > 64, "shown, with its strength");
+                check(root.editorReady(), "a drawn password is enough to Add");
+                root.setGenStyle("random:32:ds", crPass);
+                waitFor(function () { return crPass.text.length === 32; }, 10000, "random draw");
+                waitFor(function () { return root.settings.generator === "random:32:ds"; }, 10000, "kept");
+                root.setGenStyle("pin:8", crPass);
+                waitFor(function () { return /^\d{8}$/.test(crPass.text); }, 10000, "pin draw");
+                root.stopGenerating(); root.createGenerate = false; crPass.text = "";
+                check(crPass.password && !root.editorReady(), "type my own masks and empties it");
+                root.setGenStyle("apple", crPass); root.stopGenerating();   // leave the default
+                root.closeEditor();
+                say(step);
+
                 step = "lock";
                 root.setCatTag({ kind: "cat", key: "deleted", label: "Deleted" });
                 root.lockNow();
@@ -410,7 +430,7 @@ class WindowFlowTests(unittest.IsolatedAsyncioTestCase):
         steps = re.findall(r"FLOW-STEP (.+)", out)
         self.assertIn("FLOW-DONE", out, f"steps done: {steps}\n" + out[-4000:])
         self.assertEqual(steps, ["unlock", "hover", "choose Codes", "Backspace", "choose a tag",
-                                 "edit tags", "copy-text", "copy fails", "features", "create",
+                                 "edit tags", "copy-text", "copy fails", "features", "create", "generate",
                                  "lock"])
 
         # Unlock, then .manage for the category, keychain check and new entry.

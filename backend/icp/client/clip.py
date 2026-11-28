@@ -248,6 +248,7 @@ class Offer:
     started: float = 0.0
     pasted_at: float | None = None
     paste_holders: frozenset | None = None
+    paste_reader: str = ""                  # its program name, read while it still runs
     outcome: str | None = None              # set once the offer is over
     served: int = 0                         # writes of the value
     refused_watchers: int = 0
@@ -317,6 +318,7 @@ class Offer:
             self.served += 1
             self.pasted_at = self.now()
             self.paste_holders = readers.pids
+            self.paste_reader = reader_name(readers.pids, self.bridge)
             self.log.append((mime, "pasted" if written == len(self.value) else "pasted-partly"))
         finally:
             os.close(fd)
@@ -484,6 +486,25 @@ def report(out, event: str, **fields) -> None:
         pass
 
 
+def reader_name(holders, bridge: int | None = None, proc: str = "/proc") -> str:
+    """Which program took the paste, by process name only: what the daemon logs and the window
+    names, so a paste that went somewhere unexpected can be told apart from no paste at all.
+    Read at the paste, while the reader still runs (wl-paste is gone a moment later). "x11"
+    for the compositor's XWayland bridge (the X11 app itself cannot be seen from here), ""
+    when it cannot be read (gone already, or not a plain name)."""
+    pids = sorted(holders or ())
+    if not pids:
+        return ""
+    if bridge and bridge in pids:
+        return "x11"
+    try:
+        with open(f"{proc}/{pids[0]}/comm", encoding="utf-8", errors="replace") as f:
+            name = f.read().strip()
+    except OSError:
+        return ""
+    return name if re.match(protocol.CLIP_READER_RE, name) else ""
+
+
 def run(stdin, socket_path: str, wayland_path: str, identify=None, out=None) -> int:
     out = sys.stdout if out is None else out
     try:
@@ -542,8 +563,12 @@ def run(stdin, socket_path: str, wayland_path: str, identify=None, out=None) -> 
             value[i] = 0
     if offer is None or not offer.offered:
         report(out, "error", reason=reason)
+    extra = {}
+    reader = offer.paste_reader if offer is not None and outcome == "pasted" else ""
+    if reader:
+        extra["reader"] = reader
     try:
-        daemon.request("clip-result", timeout=5, outcome=outcome)
+        daemon.request("clip-result", timeout=5, outcome=outcome, **extra)
     except ChannelError:
         pass
     daemon.close()

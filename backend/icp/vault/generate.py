@@ -58,3 +58,86 @@ def generate(rng=None) -> str:
     joined = "".join(chars)
     size = PAIRS_PER_GROUP * 2
     return "-".join(joined[i:i + size] for i in range(0, n, size))
+
+
+# --- styles the window can pick -----------------------------------------------------------------
+#
+# A style is one short string, so it can be kept as a single setting and checked in one place:
+#
+#   "apple"                Apple's six-six-six shape above
+#   "random:<n>:<flags>"   n characters (RANDOM_LENGTH) of letters in both cases, plus digits if
+#                          flags holds "d" and symbols if it holds "s" (flags in that order)
+#   "pin:<n>"              n digits (PIN_LENGTH)
+#
+# Every character class a style asks for is guaranteed to appear: a random password is drawn
+# again until it does, so the result stays uniform over the passwords that satisfy the rule.
+
+STYLE_DEFAULT = "apple"
+RANDOM_LENGTH = (8, 64)
+PIN_LENGTH = (4, 12)
+LOWER = "abcdefghijklmnopqrstuvwxyz"
+UPPER = LOWER.upper()
+ALL_DIGITS = "0123456789"
+SYMBOLS = "!@#$%^&*-_+=?.,:;~"
+
+
+class StyleError(ValueError):
+    pass
+
+
+def parse_style(style) -> dict:
+    """{"kind": "apple"|"random"|"pin", "length", "digits", "symbols"}, or raise StyleError."""
+    if not isinstance(style, str) or len(style) > 32:
+        raise StyleError("a style is a short string")
+    if style == "apple":
+        return {"kind": "apple", "length": GROUPS * PAIRS_PER_GROUP * 2 + GROUPS - 1,
+                "digits": True, "symbols": True}
+    parts = style.split(":")
+    if parts[0] == "random" and len(parts) == 3:
+        n, flags = parts[1], parts[2]
+        lo, hi = RANDOM_LENGTH
+        if flags not in ("", "d", "s", "ds"):
+            raise StyleError("unknown flags")
+    elif parts[0] == "pin" and len(parts) == 2:
+        n, flags = parts[1], ""
+        lo, hi = PIN_LENGTH
+    else:
+        raise StyleError("unknown style")
+    if not n.isdigit() or n != str(int(n)) or not lo <= int(n) <= hi:
+        raise StyleError("length out of range")
+    if parts[0] == "pin":
+        return {"kind": "pin", "length": int(n), "digits": True, "symbols": False}
+    return {"kind": "random", "length": int(n), "digits": "d" in flags, "symbols": "s" in flags}
+
+
+def _classes(cfg: dict) -> list:
+    if cfg["kind"] == "pin":
+        return [ALL_DIGITS]
+    out = [LOWER, UPPER]
+    if cfg["digits"]:
+        out.append(ALL_DIGITS)
+    if cfg["symbols"]:
+        out.append(SYMBOLS)
+    return out
+
+
+def style_entropy_bits(style: str) -> float:
+    cfg = parse_style(style)
+    if cfg["kind"] == "apple":
+        return entropy_bits()
+    return cfg["length"] * math.log2(len("".join(_classes(cfg))))
+
+
+def generate_style(style: str, rng=None) -> str:
+    """A password in the given style (see above). Raises StyleError for a bad style."""
+    cfg = parse_style(style)
+    rng = rng or secrets.SystemRandom()
+    if cfg["kind"] == "apple":
+        return generate(rng)
+    classes = _classes(cfg)
+    alphabet = "".join(classes)
+    while True:
+        pw = "".join(rng.choice(alphabet) for _ in range(cfg["length"]))
+        # A class has at most 26 of ~80 characters, so for 8+ characters this rarely loops.
+        if all(any(c in cls for c in pw) for cls in classes):
+            return pw

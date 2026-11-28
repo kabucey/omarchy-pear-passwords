@@ -85,7 +85,7 @@ class GrantRunsOutTests(unittest.TestCase):
     def test_expiry_discards_secret_edits_and_closes_the_editor(self):
         # Execute the real expiry and cleanup functions, rather than asserting their spelling.
         funcs = {name: function_body(name) for name in
-                 ("grantRanOut", "endGrant", "forgetSecrets", "hideSecrets")}
+                 ("grantRanOut", "endGrant", "forgetSecrets", "hideSecrets", "stopGenerating")}
         script = "const funcs = " + json.dumps(funcs) + ";" + r'''
 const root = {editorOpen: true, editorMode: "notes", selectedId: "entry",
     changing: true, notesText: "secret notes", notesLoaded: true,
@@ -104,6 +104,126 @@ process.stdout.write(JSON.stringify({editorOpen: root.editorOpen, changing: root
         result = subprocess.run(["node"], input=script, text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(result.stdout), {"editorOpen": False, "changing": False,
                           "notes": "", "draft": None, "fields": ["", "", ""]})
+
+
+class RepeatedPressTests(unittest.TestCase):
+    """A second Copy while the account is still opening (a sync holds the store for seconds)
+    must not ask again: the daemon cancels the first grant, so the wait started over."""
+
+    def run_js(self, script_tail: str) -> dict:
+        body = function_body("withGrant")
+        script = "const body = " + json.dumps(body) + ";" + r'''
+const sent = [];
+const root = {selected: {primary: "Example"}, selectedId: "e.1", unlocked: false, syncing: true,
+    granting: false, grantAfter: null, grantSeq: 0, grantRid: -1, status: "", grantId: "",
+    send: function (op, args, cb) { sent.push({op: op, args: args, cb: cb}); return sent.length; }};
+root.withGrant = new Function("root", "after", body).bind(null, root);
+const reply = {id: "e.1", expires: 0, single_use: false};
+''' + script_tail
+        out = subprocess.run(["node"], input=script, text=True, capture_output=True, check=True)
+        return json.loads(out.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to execute the window's JavaScript")
+    def test_two_presses_send_one_grant_and_run_the_newest_action_once(self):
+        r = self.run_js(r'''
+const ran = [];
+root.withGrant(function () { ran.push("first"); });
+const statusWhileSyncing = root.status;
+root.withGrant(function () { ran.push("second"); });
+sent[0].cb(reply);
+process.stdout.write(JSON.stringify({grants: sent.filter(s => s.op === "grant").length,
+    ran: ran, status: statusWhileSyncing, granting: root.granting, grantId: root.grantId}));
+''')
+        self.assertEqual(r["grants"], 1)
+        self.assertEqual(r["ran"], ["second"])
+        self.assertIn("once the sync finishes", r["status"])
+        self.assertEqual((r["granting"], r["grantId"]), (False, "e.1"))
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to execute the window's JavaScript")
+    def test_a_reply_for_a_replaced_request_runs_nothing(self):
+        r = self.run_js(r'''
+const ran = [];
+root.withGrant(function () { ran.push("old"); });
+// select() moved on: a new account, a new request.
+root.granting = false; root.grantAfter = null; root.grantSeq++;
+root.selectedId = "e.2"; reply.id = "e.2";
+root.withGrant(function () { ran.push("new"); });
+sent[0].cb({id: "e.1"});                  // the old request answers late
+const releasesAfterStale = sent.filter(s => s.op === "release").length;
+sent[1].cb(reply);
+process.stdout.write(JSON.stringify({ran: ran, releases: releasesAfterStale, grantId: root.grantId}));
+''')
+        self.assertEqual(r["ran"], ["new"])
+        self.assertEqual(r["releases"], 0)        # the newer grant was on its way
+        self.assertEqual(r["grantId"], "e.2")
+
+
+class CopyPressTests(unittest.TestCase):
+    """A second Copy while the first is still on its way does nothing, and a buffer that ran
+    out at that moment is opened again and copied without another press."""
+
+    def run_js(self, tail: str) -> dict:
+        funcs = {n: function_body(n) for n in ("copyField", "withGrant")}
+        script = "const funcs = " + json.dumps(funcs) + ";" + r'''
+const sent = [];
+const timer = {restart: function () {}};
+const clipComponent = {createObject: function (p, o) { return {ticket: o.ticket}; }};
+const root = {selected: {primary: "Bank", has_password: true}, selectedId: "e.1", unlocked: true,
+    syncing: false, granting: false, grantAfter: null, grantSeq: 0, grantRid: -1, status: "",
+    grantId: "e.1", copyPending: "", clipLatest: null, ended: 0,
+    clipWords: function (f) { return f; }, showFlash: function () {},
+    whenFocused: function (fn) { fn(); },
+    endGrant: function () { root.ended++; root.grantId = ""; root.unlocked = false; },
+    send: function (op, args, cb) { sent.push({op: op, args: args, cb: cb}); return sent.length; }};
+root.copyField = new Function("root", "copyPendingTimer", "clipComponent", "field", "retried",
+                              funcs.copyField).bind(null, root, timer, clipComponent);
+root.withGrant = new Function("root", "after", funcs.withGrant).bind(null, root);
+''' + tail
+        out = subprocess.run(["node"], input=script, text=True, capture_output=True, check=True)
+        return json.loads(out.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to execute the window's JavaScript")
+    def test_a_second_press_while_copying_does_nothing(self):
+        r = self.run_js(r'''
+root.copyField("password");
+root.copyField("password");
+sent[0].cb({ticket: "t1"});
+const afterOffer = sent.length;
+process.stdout.write(JSON.stringify({copies: sent.filter(s => s.op === "copy").length,
+    latest: root.clipLatest && root.clipLatest.ticket, pending: root.copyPending}));
+''')
+        self.assertEqual(r["copies"], 1)
+        self.assertEqual(r["latest"], "t1")
+        self.assertEqual(r["pending"], "e.1/password")      # until pear-clip offers it
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to execute the window's JavaScript")
+    def test_an_expired_buffer_is_opened_again_and_copied(self):
+        r = self.run_js(r'''
+root.copyField("password");
+sent[0].cb({error: "grant-expired"});           // ran out between the two clocks
+const grant = sent[1];
+grant.cb({id: "e.1", expires: 0, single_use: false});
+const copy2 = sent[2];
+copy2.cb({ticket: "t2"});
+process.stdout.write(JSON.stringify({ops: sent.map(s => s.op), ended: root.ended,
+    latest: root.clipLatest && root.clipLatest.ticket, status: root.status}));
+''')
+        self.assertEqual(r["ops"], ["copy", "grant", "copy"])
+        self.assertEqual(r["ended"], 1)
+        self.assertEqual(r["latest"], "t2")
+        self.assertEqual(r["status"], "")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to execute the window's JavaScript")
+    def test_it_retries_once_only(self):
+        r = self.run_js(r'''
+root.copyField("password");
+sent[0].cb({error: "grant-expired"});
+sent[1].cb({id: "e.1", expires: 0, single_use: false});
+sent[2].cb({error: "grant-expired"});
+process.stdout.write(JSON.stringify({ops: sent.map(s => s.op), status: root.status}));
+''')
+        self.assertEqual(r["ops"], ["copy", "grant", "copy"])
+        self.assertEqual(r["status"], "that account closed — open it again")
 
 
 class SecretFieldTests(unittest.TestCase):

@@ -543,7 +543,7 @@ class SettingsTests(StoreCase):
         s = vstore.UserStore.open(UID)
         self.assertEqual(s.load_settings(),
                          {"grant_s": 120, "idle_lock_s": 300, "clip_timeout_s": 30,
-                          "window_mode": "floating"})
+                          "window_mode": "floating", "generator": "apple"})
         s.save_settings({"grant_s": 60, "idle_lock_s": 300, "clip_timeout_s": 30})
         self.assertEqual(s.load_settings()["grant_s"], 60)
         self.assertEqual(stat.S_IMODE((self.udir / "state.json").stat().st_mode), 0o600)

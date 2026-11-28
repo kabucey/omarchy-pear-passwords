@@ -1115,5 +1115,32 @@ class RunTests(unittest.TestCase):
         self.assertEqual(clip.run(io.StringIO(""), "/nonexistent", "/x"), 2)
 
 
+
+class ReaderNameTests(unittest.TestCase):
+    """Which program took the paste, by name only, for the daemon's log and the window."""
+
+    def proc(self, comms):
+        d = tempfile.mkdtemp()
+        for pid, name in comms.items():
+            os.makedirs(os.path.join(d, str(pid)))
+            with open(os.path.join(d, str(pid), "comm"), "w") as f:
+                f.write(name + "\n")
+        return d
+
+    def test_names_the_reader(self):
+        d = self.proc({4100: "brave", 4200: "wl-paste"})
+        self.assertEqual(clip.reader_name({4200, 4100}, None, d), "brave")   # lowest pid
+
+    def test_the_x11_bridge_is_x11(self):
+        d = self.proc({10: "Hyprland"})
+        self.assertEqual(clip.reader_name({10}, 10, d), "x11")
+
+    def test_nothing_when_gone_or_odd(self):
+        d = self.proc({7: "we ird/name"})
+        self.assertEqual(clip.reader_name({7}, None, d), "")
+        self.assertEqual(clip.reader_name({8}, None, d), "")
+        self.assertEqual(clip.reader_name((), None, d), "")
+
+
 if __name__ == "__main__":
     unittest.main()

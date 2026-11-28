@@ -238,7 +238,7 @@ class TagsRowTests(unittest.TestCase):
     def test_the_create_form_says_why_tags_stop_add(self):
         hint = CODE[CODE.index("text: root.tagsProblem(crTags.text)") - 300:][:600]
         self.assertIn("visible: root.createMore && text !== \"\"", hint)
-        self.assertIn("Layout.row: 9; Layout.column: 1", hint)
+        self.assertIn("Layout.row: 10; Layout.column: 1", hint)
         body = function_body("tagsProblem")
         self.assertIn('"a tag is 1 to 32 letters, digits, - or _"', body)
         self.assertIn('"at most 16 tags"', body)

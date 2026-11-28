@@ -33,7 +33,11 @@ Omarchy's own shell components.
 - **Password history.** Changes seen during sync are kept, alongside the history Apple stores.
 - **Change a password, one at a time.** Writes back to iCloud, so your other devices get it.
   Each change is written and read back on its own; nothing rewrites your passwords in bulk.
-- **Strong, memorable passwords.** The generator uses the same six-six-six shape as Apple's.
+- **A password generator you can see and tune.** **Generate** fills the field straight away
+  with a password you can read, edit or draw again (**New one**) before you save. Pick
+  **Memorable** (Apple's six-six-six shape), **Random** (8 to 64 characters, with or without
+  numbers and symbols) or **PIN** (4 to 12 digits); every change draws a new one, a strength
+  note shows how strong it is, and Pear remembers the last style you picked.
 - **Names that sync.** Rename an entry here and the name shows up on your other devices too.
 - **Wi-Fi passwords.** Your saved networks, shown as networks rather than websites.
 - **Search that understands what you want.** Type a name or site, or one of these to filter:
@@ -119,7 +123,7 @@ one command for you to run with sudo:
 
 <!-- pinned: tools/gen-sha256sums.sh keeps the hash below equal to sha256(SHA256SUMS) -->
 ```sh
-sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "b61491307fb0031af482bfe759fbdb5cbd04b86a459f2ca0e2c677f57e2654b0  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
+sudo sh -c 'set -eu; h=$(getent passwd "${SUDO_USER:?run this with sudo}" | cut -d: -f6); s=$(mktemp -d /root/pear-stage.XXXXXX); trap "rm -rf \"$s\"" EXIT; cp -rT --no-preserve=all "$h/.cache/pear-passwords/stage" "$s"; cd "$s"; echo "126b99e708cef087fc186c10a6b0419238984d3557a28e57196a6fd5d88bc393  SHA256SUMS" | sha256sum -c --strict --quiet; sha256sum -c --strict --quiet SHA256SUMS; sh ./system/install-root.sh "$s"'
 ```
 
 The command copies the stage into a fresh directory only root can write, checks that its

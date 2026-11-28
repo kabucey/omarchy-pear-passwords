@@ -72,6 +72,7 @@ DEFAULT_SETTINGS = {
     "idle_lock_s": IDLE_LOCK_S_DEFAULT,
     "clip_timeout_s": CLIP_TIMEOUT_S_DEFAULT,
     "window_mode": WINDOW_MODE_DEFAULT,
+    "generator": "apple",             # the password style last picked (vault.generate styles)
 }
 
 # --- migration -------------------------------------------------------------------------------
@@ -93,6 +94,7 @@ ROLE_OPS: dict[str, frozenset[str]] = {
         "migrate-begin", "migrate-abandon", "reset", "purge-old-copy", "clip-history-check",
         "cancel", "tpm-move",
         "autofill-enable", "copy-text", "features", "diag-items", "diag-sharing",
+        "generate",
     }),
     "clip": frozenset({"redeem", "clip-result"}),
     "migrate": frozenset({"import-file", "import-key", "import-commit", "purge-result"}),
@@ -148,6 +150,9 @@ FEATURES = ("passkeys", "apple_deleted")
 DEFAULT_FEATURES = {k: False for k in FEATURES}
 
 CLIP_OUTCOMES = ("pasted", "expired", "replaced", "withdrawn", "failed")
+# clip-result's optional `reader`: the program that took the paste, by process name only (its
+# /proc comm, at most 15 characters), or "x11" for the compositor's XWayland bridge.
+CLIP_READER_RE = r"^[A-Za-z0-9._+-]{1,15}$"
 LOCK_REASONS = ("user", "screen-locked", "sleep", "session-ended", "idle", "reset",
                 "signout", "error")
 UNLOCK_REFUSALS = ("dismissed", "denied", "no-agent", "busy", "rate-limited", "empty") + SEAL_STATES

@@ -128,10 +128,13 @@ def _store_error(e: BaseException) -> OpError | None:
     return None
 
 
-async def _store(reg, uid: int, fn, *args, keyless: bool = False, replaces: bool = False):
+async def _store(reg, uid: int, fn, *args, keyless: bool = False, replaces: bool = False,
+                 reads: bool = False):
     try:
         if replaces:
             return await reg.run_store(uid, fn, *args, replaces=True)
+        if reads:
+            return await reg.run_store(uid, fn, *args, reads=True)
         return await reg.run_store(uid, fn, *args, keyless=keyless)
     except Exception as e:
         err = _store_error(e)
@@ -620,7 +623,7 @@ async def op_grant(reg, conn, req):
     epoch = s.epoch
     s.grant_serial += 1
     serial = s.grant_serial
-    meta = await _store(reg, conn.uid, s.store.get_meta, id)
+    meta = await _store(reg, conn.uid, s.store.get_meta, id, reads=True)
     _still(s, conn, epoch)
     if s.grant_serial != serial:
         raise OpError("cancelled")
@@ -628,7 +631,7 @@ async def op_grant(reg, conn, req):
     serial = s.grant_serial
     # This exact UI connection already authenticated at unlock. Open one entry's
     # temporary buffer without asking polkit again; every lock still ends access.
-    secrets_ = await _store(reg, conn.uid, s.store.open_entry, id)
+    secrets_ = await _store(reg, conn.uid, s.store.open_entry, id, reads=True)
     try:
         _still(s, conn, epoch)
         if s.grant_serial != serial:
@@ -734,7 +737,7 @@ async def op_copy(reg, conn, req):
             reg.end_grant(conn.uid)
     else:
         epoch = s.epoch
-        meta = await _store(reg, conn.uid, s.store.get_meta, id)
+        meta = await _store(reg, conn.uid, s.store.get_meta, id, reads=True)
         _still(s, conn, epoch)
         value = meta.username if field == "username" else meta.domain
     # One offer at a time: a new copy withdraws the previous one.
@@ -946,6 +949,21 @@ async def op_totp_preview(reg, conn, req):
                      algorithm=cfg["algorithm"], at=now)
     return {"code": code, "seconds": totp.seconds_remaining(cfg["period"], at=now),
             "issuer": cfg.get("issuer", ""), "account": cfg.get("accountName", "")}
+
+
+async def op_generate(reg, conn, req):
+    """A password in the asked style, for the window to show and edit before it is saved.
+
+    Generated here rather than in the window because QML has no secure random source. The
+    value goes to the window like a typed one; nothing is stored, logged or sent to iCloud."""
+    _tier1(reg, conn)
+    style = _need(req, "style", str)
+    from ..vault import generate as gen
+    try:
+        password = gen.generate_style(style)
+    except gen.StyleError:
+        raise OpError("invalid", field="style") from None
+    return {"password": password, "bits": round(gen.style_entropy_bits(style), 1)}
 
 
 # --- ui: sign-in --------------------------------------------------------------------------------
@@ -1384,8 +1402,18 @@ async def op_clip_result(reg, conn, req):
         raise OpError("bad-ticket")
     if conn.data.get("result"):
         raise OpError("invalid", field="outcome")
+    reader = req.get("reader")
+    if reader is not None and (outcome != "pasted" or not isinstance(reader, str)
+                               or not re.match(protocol.CLIP_READER_RE, reader)):
+        raise OpError("invalid", field="reader")
     conn.data["result"] = outcome
+    # Outcome and the reading program's name only, never the value: when a copy "didn't
+    # paste", this says whether something else took it first.
+    logger.info("uid %d: copy of %s: %s%s", conn.uid, t.field, outcome,
+                f" (read by {reader})" if reader else "")
     event = {"event": "clip", "id": t.id, "field": t.field, "outcome": outcome}
+    if reader:
+        event["reader"] = reader
     after_reply(lambda: reg.notify_ui(conn.uid, event))
     return {"ok": True}
 
@@ -1581,7 +1609,7 @@ HANDLERS = {
     "unlock": op_unlock, "lock": op_lock, "release": op_release, "cancel": op_cancel,
     "grant": op_grant, "reveal": op_reveal, "totp": op_totp, "history": op_history,
     "copy": op_copy, "set": op_set, "create": op_create, "delete": op_delete,
-    "totp-preview": op_totp_preview, "signin": op_signin, "answer": op_answer,
+    "totp-preview": op_totp_preview, "generate": op_generate, "signin": op_signin, "answer": op_answer,
     "signout": op_signout, "sync": op_sync, "settings": op_settings,
     "migrate-begin": op_migrate_begin, "migrate-abandon": op_migrate_abandon,
     "tpm-move": op_tpm_move,

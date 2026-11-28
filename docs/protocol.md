@@ -87,7 +87,7 @@ Replies:
 ```json
 {"rid":0,"proto":2,"version":"2.0.0","state":"locked","signed_in":true,
  "sealed_with":"host","synced_at":null,"needs_login":null,
- "settings":{"grant_s":120,"idle_lock_s":300,"clip_timeout_s":30,"window_mode":"floating"},
+ "settings":{"grant_s":120,"idle_lock_s":300,"clip_timeout_s":30,"window_mode":"floating","generator":"apple"},
  "migration_pending":false,"autofill":{"enabled":false,"hosts":0},
  "old_copy":{"dir":"/home/u/.config/icp.v1-backup-20261008","migrated_at":1791450000.0}}
 ```
@@ -212,7 +212,7 @@ with `state` one of `locked`, `unlocked`, `unavailable` only. `unavailable` cove
 ### 3.2 Settings
 
 ```json
-{"grant_s":120,"idle_lock_s":300,"clip_timeout_s":30,"window_mode":"floating"}
+{"grant_s":120,"idle_lock_s":300,"clip_timeout_s":30,"window_mode":"floating","generator":"apple"}
 ```
 
 | key | default | allowed |
@@ -221,6 +221,7 @@ with `state` one of `locked`, `unlocked`, `unavailable` only. `unavailable` cove
 | `idle_lock_s` | 300 (5 minutes) | 0, 300, 900, 1800 |
 | `clip_timeout_s` | 30 | integer 5..60 |
 | `window_mode` | `"floating"` | `"floating"` (960x640, centred) or `"regular"` (tiled like other windows); read from the hello reply before the window maps |
+| `generator` | `"apple"` | the password style the window last picked, as `generate` takes it: `"apple"`, `"random:<8..64>:<flags>"` (flags `""`, `"d"`, `"s"` or `"ds"`: digits, symbols) or `"pin:<4..12>"` |
 
 There is no `sync_lease_h`: 2.0 has no sync lease. A `set` naming any other key is
 `{"error":"invalid","field":"<key>"}` and nothing is changed.
@@ -438,7 +439,7 @@ fields. The text goes through pear-clip like a `copy`, never onto the persistent
   arrives as the `clip` event with `"field":"text"`. The daemon never stores, logs or MACs
   the text.
 
-### 6.6 set, create, delete, totp-preview
+### 6.6 set, create, delete, totp-preview, generate
 
 ```json
 {"op":"set","rid":10,"id":"<id>","fields":{"notes":"...","sites":["a.example.com"]}}
@@ -446,6 +447,7 @@ fields. The text goes through pear-clip like a `copy`, never onto the persistent
 {"op":"create","rid":11,"fields":{"domain":"example.com","username":"me","title":"Example"},"generate":{}}
 {"op":"delete","rid":12,"id":"<id>"}
 {"op":"totp-preview","rid":13,"setup":"otpauth://totp/...?secret=..."}
+{"op":"generate","rid":14,"style":"random:20:ds"}
 ```
 
 - `set` needs a grant on `id`. `fields` may hold any of `password` (string), `notes`
@@ -476,6 +478,11 @@ fields. The text goes through pear-clip like a `copy`, never onto the persistent
 - `totp-preview` needs tier 1, no grant, reads nothing from the store: parses the setup text
   and replies `{"rid":13,"code":"123456","seconds":17,"issuer":"...","account":"..."}` or
   `invalid`.
+- `generate` needs tier 1, no grant, no dialog, reads and writes nothing: replies
+  `{"rid":14,"password":"...","bits":119.1}` with a password in `style` (the `generator`
+  setting's values, section 3.2) or `invalid` with `field:"style"`. Every character class the
+  style names appears at least once. The window shows the value so it can be checked, edited
+  or drawn again before `create` or `set` sends it as `fields.password`, like a typed one.
 - All three Apple-touching ops can fail with `not-signed-in`, `needs-login`,
   `anisette-unavailable`, `network`, `apple` (with a sanitized `detail`), `busy-sync`.
 - Validation failures are `{"error":"invalid","field":"<name>"}`.
@@ -636,7 +643,7 @@ the next grant; `idle_lock_s` restarts the idle clock.
 ```json
 {"op":"redeem","rid":1}
   -> {"rid":1,"value":"...","sensitive":true,"timeout":30}
-{"op":"clip-result","rid":2,"outcome":"pasted"}
+{"op":"clip-result","rid":2,"outcome":"pasted","reader":"brave"}
   -> {"rid":2,"ok":true}
 ```
 
@@ -646,6 +653,11 @@ the next grant; `idle_lock_s` restarts the idle clock.
   the selection), `replaced` (someone else set the selection), `withdrawn` (the daemon sent
   `withdraw`), `failed` (no data-control protocol, compositor gone). The daemon relays it as
   `{"event":"clip","id":"<id>","field":"password","outcome":"pasted"}` to the UI.
+- `reader` (optional, `pasted` only): the program that took the paste, by process name only
+  (its `/proc` comm, 1 to 15 of `A-Za-z0-9._+-`), or `"x11"` for the XWayland bridge. Anything
+  else is `invalid` with `field:"reader"`. The daemon logs the outcome and the reader (never
+  the value) and adds `reader` to the UI event, so a copy that "didn't paste" shows whether
+  another program read it first.
 - On `{"event":"withdraw"}` or EOF from the daemon the clip process destroys its source
   (clearing the clipboard only if its offer is still the selection), zeroes the value and
   exits.
@@ -706,7 +718,7 @@ if their sha256 still matches.
 {"event":"sync-failed","reason":"anisette-unavailable"|"network"|"needs-login"|"apple","detail":"..."}
 {"event":"needs-login"}
 {"event":"grant-expired","id":"<id>"}
-{"event":"clip","id":"<id>","field":"password","outcome":"pasted"}
+{"event":"clip","id":"<id>","field":"password","outcome":"pasted","reader":"brave"}
 {"event":"clip","id":null,"field":"text","outcome":"expired"}
 {"event":"autofill","id":"<id>","origin":"github.com","outcome":"filled"|"dismissed"|"denied"|"failed"}
 {"event":"autofill-hosts","count":1}
@@ -951,6 +963,7 @@ traceback.
 | `create` | ui | `.manage` | tier 1 | `{id}` |
 | `delete` | ui | `.manage` | tier 1 | `{deleted:true}` |
 | `totp-preview` | ui | – | tier 1 | `{code, seconds, issuer, account}` |
+| `generate` | ui | – | tier 1 | `{password, bits}` |
 | `signin` | ui | `.manage` | section 6.7 | stream, then `{ok:true}` |
 | `answer` | ui | – | a pending ask | `{ok:true}` |
 | `signout` | ui | `.manage` | tier 1 | `{signed_out:true}` |

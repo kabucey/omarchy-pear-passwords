@@ -134,6 +134,18 @@ def _state_keys(src: dict, out: dict) -> None:
         out["features"] = {k: src["features"].get(k) is True for k in protocol.FEATURES}
 
 
+def _string_setting_ok(key: str, value: str) -> bool:
+    if key == "window_mode":
+        return value in protocol.WINDOW_MODES
+    if key == "generator":
+        from ..vault.generate import StyleError, parse_style
+        try:
+            parse_style(value)
+        except StyleError:
+            return False
+    return True
+
+
 def load_settings(directory: Path) -> dict:
     """DEFAULT_SETTINGS overlaid with what state.json holds for those keys, plus old_copy and
     migration_pending.
@@ -152,7 +164,7 @@ def load_settings(directory: Path) -> dict:
             # Each value keeps its default's type: window_mode is a string, the rest ints.
             # Reading back only ints dropped "regular" on every daemon start.
             if isinstance(default, str):
-                if isinstance(v, str) and (k != "window_mode" or v in protocol.WINDOW_MODES):
+                if isinstance(v, str) and _string_setting_ok(k, v):
                     out[k] = v
             elif isinstance(v, int) and not isinstance(v, bool):
                 out[k] = v

@@ -105,3 +105,17 @@ class LaunchFocusTests(unittest.TestCase):
     def test_unlocking_asks_again_after_the_prompt_closes(self):
         self.assertIn("onAppUnlockedChanged: if (root.appUnlocked) "
                       "{ Qt.callLater(root.focusSearch); launchFocus.restart(); }", CODE)
+
+
+class CopyAfterPromptTests(unittest.TestCase):
+    """A copy that needed the polkit prompt waits until Pear has the keyboard again: the
+    prompt's password field reads the clipboard while focused and would take the one paste."""
+
+    def test_secret_copies_wait_for_focus(self):
+        self.assertIn("root.withGrant(function () { root.whenFocused(go); });", CODE)
+
+    def test_wait_asks_for_focus_and_has_a_fallback(self):
+        self.assertIn("if (Qt.application.state === Qt.ApplicationActive) { fn(); return; }", CODE)
+        self.assertIn("focusProc.running = true;\n        afterFocusTimer.restart();", CODE)
+        self.assertIn("Timer { id: afterFocusTimer; interval: 1500; "
+                      "onTriggered: root.runAfterFocus() }", CODE)

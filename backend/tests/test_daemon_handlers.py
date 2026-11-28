@@ -38,7 +38,7 @@ class HelloAndUnlockTests(Base):
                                  "synced_at": None, "needs_login": None,
                                  "settings": {"grant_s": 120, "idle_lock_s": 300,
                                               "clip_timeout_s": 30,
-                                              "window_mode": "floating"},
+                                              "window_mode": "floating", "generator": "apple"},
                                  "migration_pending": False,
                                  "autofill": {"enabled": False, "hosts": 0},
                                  "old_copy": None})
@@ -117,7 +117,8 @@ class HelloAndUnlockTests(Base):
         for op, extra in (("grant", {"id": "e.0"}), ("copy", {"id": "e.0", "field": "username"}),
                           ("create", {"fields": {"password": "x"}}), ("delete", {"id": "e.0"}),
                           ("signout", {}), ("clip-history-check", {"items": []}),
-                          ("totp-preview", {"setup": "JBSWY3DPEHPK3PXP"})):
+                          ("totp-preview", {"setup": "JBSWY3DPEHPK3PXP"}),
+                          ("generate", {"style": "apple"})):
             self.assertEqual((await self.ui.call(op, **extra))["error"], "locked", op)
         self.assertEqual(self.dialogs(), [])
         self.assertEqual(await self.ui.call("sync"), {"rid": self.ui.rid, "skipped": "locked"})
@@ -549,6 +550,21 @@ class EditTests(Base):
         self.assertEqual((await self.ui.call("totp-preview", setup="nope"))["error"], "invalid")
         self.assertEqual(self.st.unseal_count, 0)
 
+    async def test_generate(self):
+        r = await self.ui.call("generate", style="random:24:ds")
+        self.assertEqual(len(r["password"]), 24)
+        self.assertGreater(r["bits"], 100)
+        self.assertRegex((await self.ui.call("generate", style="pin:6"))["password"], r"^\d{6}$")
+        self.assertEqual((await self.ui.call("generate", style="random:3:"))["error"], "invalid")
+        self.assertEqual((await self.ui.call("generate"))["error"], "bad-request")
+        self.assertEqual(self.st.unseal_count, 0)
+
+    async def test_generator_setting(self):
+        r = await self.ui.call("settings", set={"generator": "random:30:d"})
+        self.assertEqual(r["settings"]["generator"], "random:30:d")
+        r = await self.ui.call("settings", set={"generator": "random:300:d"})
+        self.assertEqual(r["error"], "invalid")
+
     async def test_clip_history_check(self):
         r = await self.ui.call("clip-history-check", items=["x", "pw-1-fake", "pw-0-fake"])
         self.assertEqual(r["matches"], [1, 2])
@@ -559,7 +575,7 @@ class EditTests(Base):
     async def test_settings(self):
         r = await self.ui.call("settings", set={"grant_s": 60, "clip_timeout_s": 5})
         self.assertEqual(r["settings"], {"grant_s": 60, "idle_lock_s": 300, "clip_timeout_s": 5,
-                                         "window_mode": "floating"})
+                                         "window_mode": "floating", "generator": "apple"})
         r = await self.ui.call("settings", set={"window_mode": "regular"})
         self.assertEqual(r["settings"]["window_mode"], "regular")
         self.assertEqual(self.st.settings["grant_s"], 60)
@@ -572,6 +588,57 @@ class EditTests(Base):
         self.assertEqual((await self.ui.call("settings"))["error"], "bad-request")
         r = await self.ui.call("grant", id="e.0")
         self.assertEqual(r["grant_s"], 60)
+
+
+class CopyDuringSyncTests(Base):
+    """A sync holds the store lock for its whole round trip to iCloud. Opening an account and
+    copying a username read one entry, which the store's own mutex already keeps apart from
+    apply_sync, so they must not wait for the sync to end (the copy that "needed two presses")."""
+
+    async def test_grant_and_copy_do_not_wait_for_a_running_sync(self):
+        import threading
+        await self.h.unlock(self.ui)                                   # and its own sync ends
+        gate, started = threading.Event(), threading.Event()
+        plain_sync = self.h.apple.sync
+
+        def slow_sync(ctx):
+            started.set()
+            gate.wait(10)
+            return plain_sync(ctx)
+        self.h.apple.sync = slow_sync
+        try:
+            self.assertTrue((await self.ui.call("sync"))["queued"])
+            await asyncio.get_running_loop().run_in_executor(None, started.wait, 5)
+            self.assertTrue(self.h.reg.get(UID).store_lock.locked())    # the sync holds it
+            g = await asyncio.wait_for(self.ui.call("grant", id="e.0"), 2)
+            self.assertEqual(g["id"], "e.0")
+            c = await asyncio.wait_for(self.ui.call("copy", id="e.0", field="password"), 2)
+            self.assertIn("ticket", c)
+            u = await asyncio.wait_for(self.ui.call("copy", id="e.1", field="username"), 2)
+            self.assertIn("ticket", u)
+            self.assertFalse(gate.is_set())                             # still syncing
+        finally:
+            gate.set()
+            await self.h.syncs_done()
+
+    async def test_only_the_one_entry_reads_skip_the_lock(self):
+        s = self.h.reg.get(UID)
+        with self.assertRaises(protocol_error()):
+            await self.h.reg.run_store(UID, s.store.list_meta, reads=True)
+
+    async def test_a_lock_still_refuses_a_concurrent_read(self):
+        s = self.h.reg.get(UID)
+        s.wipe_after = True
+        try:
+            with self.assertRaises(protocol_error()):
+                await self.h.reg.run_store(UID, s.store.get_meta, "e.0", reads=True)
+        finally:
+            s.wipe_after = False
+
+
+def protocol_error():
+    from icp.daemon.protocol import OpError
+    return OpError
 
 
 class NotesBodyTests(Base):
@@ -700,6 +767,26 @@ class CopyTextTests(Base):
         self.assertEqual((ev["id"], ev["field"], ev["outcome"]), (None, "text", "pasted"))
         self.assertEqual(self.dialogs(), [paths.ACTION_UNLOCK])
         self.assertEqual(self.st.unseal_count, 0)
+
+    async def test_the_reader_of_a_paste_is_named(self):
+        r = await self.ui.call("copy-text", source="create-password", text="x")
+        c, _ = await self.clip(r["ticket"])
+        await c.call("redeem")
+        with self.assertLogs("icp.daemon.handlers", level="INFO") as logs:
+            await c.call("clip-result", outcome="pasted", reader="brave")
+        ev = await self.ui.event("clip")
+        self.assertEqual((ev["outcome"], ev["reader"]), ("pasted", "brave"))
+        self.assertTrue(any("copy of text: pasted (read by brave)" in m for m in logs.output))
+        self.assertFalse(any("x" == m.rsplit(" ", 1)[-1] for m in logs.output))   # never the value
+
+    async def test_a_bad_reader_is_refused(self):
+        for outcome, reader in (("pasted", "a b"), ("pasted", "x" * 16), ("expired", "brave"),
+                                ("pasted", 7)):
+            r = await self.ui.call("copy-text", source="create-password", text="x")
+            c, _ = await self.clip(r["ticket"])
+            await c.call("redeem")
+            res = await c.call("clip-result", outcome=outcome, reader=reader)
+            self.assertEqual((res["error"], res["field"]), ("invalid", "reader"), (outcome, reader))
 
     async def test_grant_sources_need_a_live_grant_and_never_use_it_up(self):
         for source in sorted(protocol.COPY_TEXT_SOURCES_GRANT):

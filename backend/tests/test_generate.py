@@ -51,5 +51,37 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class StyleTests(unittest.TestCase):
+    def test_apple_style_is_the_apple_shape(self):
+        self.assertRegex(g.generate_style("apple"), r"^[A-Za-z0-9]{6}-[A-Za-z0-9]{6}-[A-Za-z0-9]{6}$")
+        self.assertEqual(g.style_entropy_bits("apple"), g.entropy_bits())
+
+    def test_random_has_the_length_and_every_class_asked_for(self):
+        for flags in ("", "d", "s", "ds"):
+            for n in (8, 20, 64):
+                for _ in range(50):
+                    p = g.generate_style(f"random:{n}:{flags}")
+                    self.assertEqual(len(p), n)
+                    self.assertTrue(any(c in g.LOWER for c in p), p)
+                    self.assertTrue(any(c in g.UPPER for c in p), p)
+                    self.assertEqual(any(c in g.ALL_DIGITS for c in p), "d" in flags, p)
+                    self.assertEqual(any(c in g.SYMBOLS for c in p), "s" in flags, p)
+
+    def test_pin_is_digits(self):
+        for n in (4, 6, 12):
+            self.assertRegex(g.generate_style(f"pin:{n}"), rf"^\d{{{n}}}$")
+
+    def test_entropy_grows_with_options(self):
+        self.assertLess(g.style_entropy_bits("random:20:"), g.style_entropy_bits("random:20:ds"))
+        self.assertLess(g.style_entropy_bits("random:12:ds"), g.style_entropy_bits("random:20:ds"))
+
+    def test_bad_styles_are_refused(self):
+        for bad in ("", "Apple", "random", "random:7:ds", "random:65:ds", "random:20:sd",
+                    "random:020:ds", "random:20:x", "pin:3", "pin:13", "pin:6:d", "random:-1:",
+                    "random: 20:", None, 20, "x" * 40):
+            with self.assertRaises(g.StyleError, msg=repr(bad)):
+                g.parse_style(bad)
+
+
 if __name__ == "__main__":
     unittest.main()
